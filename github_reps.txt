@@ -1,5 +1,4 @@
 https://github.com/tensorflow/models
-https://github.com/shadowsocks/shadowsocks
 https://github.com/django/django
 https://github.com/scikit-learn/scikit-learn
 https://github.com/keras-team/keras
