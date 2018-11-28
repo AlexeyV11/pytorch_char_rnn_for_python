@@ -92,9 +92,7 @@ def main():
     for file in files:
         shutil.copy2(file, database_folder)
 
-
-
-    pass
+    print("dataset generated in folder : " + database_folder)
 
 if __name__ == "__main__":
     main()
