@@ -1,0 +1,3587 @@
+<BOF>
+#!/usr/bin/env python
+# vim: set encoding=utf-8
+
+"""
+Main server program.
+"""
+from __future__ import print_function
+
+from gevent.monkey import patch_all
+from gevent.pywsgi import WSGIServer
+
+patch_all()
+
+# pylint: disable=wrong-import-position,wrong-import-order
+import sys
+import logging
+import os
+
+import requests
+
+import jinja2
+from flask import Flask, request, send_from_directory, redirect, Response
+
+MYDIR = os.path.abspath(os.path.join(__file__, '..', '..'))
+sys.path.append("%s/lib/" % MYDIR)
+
+from globals import FILE_QUERIES_LOG, LOG_FILE, TEMPLATES, STATIC, MALFORMED_RESPONSE_HTML_PAGE, SERVER_ADDRESS, SERVER_PORT
+from limits import Limits
+from cheat_wrapper import cheat_wrapper
+from post import process_post_request
+from options import parse_args
+
+from stateful_queries import save_query, last_query
+# pylint: disable=wrong-import-position,wrong-import-order
+
+if not os.path.exists(os.path.dirname(LOG_FILE)):
+    os.makedirs(os.path.dirname(LOG_FILE))
+logging.basicConfig(filename=LOG_FILE, level=logging.DEBUG, format='%(asctime)s %(message)s')
+
+app = Flask(__name__) # pylint: disable=invalid-name
+app.jinja_loader = jinja2.ChoiceLoader([
+    app.jinja_loader,
+    jinja2.FileSystemLoader(TEMPLATES),
+])
+
+LIMITS = Limits()
+
+def is_html_needed(user_agent):
+    """
+    Basing on `user_agent`, return whether it needs HTML or ANSI
+    """
+    plaintext_clients = ['curl', 'wget', 'fetch', 'httpie', 'lwp-request', 'openbsd ftp', 'python-requests']
+    return all([x not in user_agent for x in plaintext_clients])
+
+def is_result_a_script(query):
+    return query in [':cht.sh']
+
+@app.route('/files/<path:path>')
+def send_static(path):
+    """
+    Return static file `path`.
+    Can be served by the HTTP frontend.
+    """
+    return send_from_directory(STATIC, path)
+
+@app.route('/favicon.ico')
+def send_favicon():
+    """
+    Return static file `favicon.ico`.
+    Can be served by the HTTP frontend.
+    """
+    return send_from_directory(STATIC, 'favicon.ico')
+
+@app.route('/malformed-response.html')
+def send_malformed():
+    """
+    Return static file `malformed-response.html`.
+    Can be served by the HTTP frontend.
+    """
+    return send_from_directory(STATIC, 'malformed-response.html')
+
+def log_query(ip_addr, found, topic, user_agent):
+    """
+    Log processed query and some internal data
+    """
+    log_entry = "%s %s %s %s" % (ip_addr, found, topic, user_agent)
+    with open(FILE_QUERIES_LOG, 'a') as my_file:
+        my_file.write(log_entry.encode('utf-8')+"\n")
+
+def get_request_ip(req):
+    """
+    Extract IP address from `request`
+    """
+
+    if req.headers.getlist("X-Forwarded-For"):
+        ip_addr = req.headers.getlist("X-Forwarded-For")[0]
+        if ip_addr.startswith('::ffff:'):
+            ip_addr = ip_addr[7:]
+    else:
+        ip_addr = req.remote_addr
+    if req.headers.getlist("X-Forwarded-For"):
+        ip_addr = req.headers.getlist("X-Forwarded-For")[0]
+        if ip_addr.startswith('::ffff:'):
+            ip_addr = ip_addr[7:]
+    else:
+        ip_addr = req.remote_addr
+
+    return ip_addr
+
+
+def _proxy(*args, **kwargs):
+    # print "method=", request.method,
+    # print "url=", request.url.replace('/:shell-x/', ':3000/')
+    # print "headers=", {key: value for (key, value) in request.headers if key != 'Host'}
+    # print "data=", request.get_data()
+    # print "cookies=", request.cookies
+    # print "allow_redirects=", False
+
+    url_before, url_after = request.url.split('/:shell-x/', 1)
+    url = url_before + ':3000/'
+
+    if 'q' in request.args:
+        url_after = '?' + "&".join("arg=%s" % x for x in request.args['q'].split())
+
+    url += url_after
+    print(url)
+    print(request.get_data())
+    resp = requests.request(
+        method=request.method,
+        url=url,
+        headers={key: value for (key, value) in request.headers if key != 'Host'},
+        data=request.get_data(),
+        cookies=request.cookies,
+        allow_redirects=False)
+
+    excluded_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
+    headers = [(name, value) for (name, value) in resp.raw.headers.items()
+               if name.lower() not in excluded_headers]
+
+    response = Response(resp.content, resp.status_code, headers)
+    return response
+
+
+@app.route("/", methods=['GET', 'POST'])
+@app.route("/<path:topic>", methods=["GET", "POST"])
+def answer(topic=None):
+    """
+    Main rendering function, it processes incoming weather queries.
+    Depending on user agent it returns output in HTML or ANSI format.
+
+    Incoming data:
+        request.args
+        request.headers
+        request.remote_addr
+        request.referrer
+        request.query_string
+    """
+
+    user_agent = request.headers.get('User-Agent', '').lower()
+    html_needed = is_html_needed(user_agent)
+    options = parse_args(request.args)
+
+    if topic in ['apple-touch-icon-precomposed.png', 'apple-touch-icon.png', 'apple-touch-icon-120x120-precomposed.png'] \
+        or (topic is not None and any(topic.endswith('/'+x) for x in ['favicon.ico'])):
+        return ''
+
+    request_id = request.cookies.get('id')
+    if topic is not None and topic.lstrip('/') == ':last':
+        if request_id:
+            topic = last_query(request_id)
+        else:
+            return "ERROR: you have to set id for your requests to use /:last\n"
+    else:
+        if request_id:
+            save_query(request_id, topic)
+
+    if request.method == 'POST':
+        process_post_request(request, html_needed)
+        if html_needed:
+            return redirect("/")
+        return "OK\n"
+
+    if 'topic' in request.args:
+        return redirect("/%s" % request.args.get('topic'))
+
+    if topic is None:
+        topic = ":firstpage"
+
+    if topic.startswith(':shell-x/'):
+        return _proxy()
+        #return requests.get('http://127.0.0.1:3000'+topic[8:]).text
+
+    ip_address = get_request_ip(request)
+    if '+' in topic:
+        not_allowed = LIMITS.check_ip(ip_address)
+        if not_allowed:
+            return "429 %s\n" % not_allowed, 429
+
+    html_is_needed = is_html_needed(user_agent) and not is_result_a_script(topic)
+    result, found = cheat_wrapper(topic, request_options=options, html=html_is_needed)
+    if 'Please come back in several hours' in result and html_is_needed:
+        return MALFORMED_RESPONSE_HTML_PAGE
+
+    log_query(ip_address, found, topic, user_agent)
+    if html_is_needed:
+        return result
+    return Response(result, mimetype='text/plain')
+
+SRV = WSGIServer((SERVER_ADDRESS, SERVER_PORT), app) # log=None)
+SRV.serve_forever()
+<EOF>
+<BOF>
+import sys
+import redis
+REDIS = redis.StrictRedis(host='localhost', port=6379, db=0)
+
+for key in sys.argv[1:]:
+    REDIS.delete(key)
+
+<EOF>
+<BOF>
+"""
+Extract text from the text-code stream and comment it.
+
+Supports three modes of normalization and commenting:
+
+    1. Don't add any comments
+    2. Add comments
+    3. Remove text, leave code only
+
+Since several operations are quite expensive,
+it actively uses caching.
+
+Exported functions:
+
+    beautify(text, lang, options)
+    code_blocks(text)
+"""
+from __future__ import print_function
+
+from gevent.monkey import patch_all
+from gevent.subprocess import Popen
+patch_all()
+
+# pylint: disable=wrong-import-position,wrong-import-order
+import sys
+import os
+import textwrap
+import hashlib
+import re
+
+from itertools import groupby, chain
+from tempfile import NamedTemporaryFile
+
+import redis
+
+MYDIR = os.path.abspath(os.path.join(__file__, '..', '..'))
+sys.path.append("%s/lib/" % MYDIR)
+from languages_data import VIM_NAME
+from globals import PATH_VIM_ENVIRONMENT, REDISHOST
+# pylint: enable=wrong-import-position,wrong-import-order
+
+REDIS = redis.StrictRedis(host=REDISHOST, port=6379, db=1)
+FNULL = open(os.devnull, 'w')
+TEXT = 0
+CODE = 1
+UNDEFINED = -1
+CODE_WHITESPACE = -2
+def _language_name(name):
+    return VIM_NAME.get(name, name)
+
+
+def _remove_empty_lines_from_beginning(lines):
+    start = 0
+    while start < len(lines) and lines[start].strip() == '':
+        start += 1
+    lines = lines[start:]
+    return lines
+
+def _remove_empty_lines_from_end(lines):
+    end = len(lines) - 1
+    while end >= 0 and lines[end].strip() == '':
+        end -= 1
+    lines = lines[:end+1]
+    return lines
+
+def _cleanup_lines(lines):
+    """
+    Cleanup `lines` a little bit: remove empty lines at the beginning
+    and at the end; remove too many empty lines in between.
+    """
+    lines = _remove_empty_lines_from_beginning(lines)
+    lines = _remove_empty_lines_from_end(lines)
+    if lines == []:
+        return lines
+    # remove repeating empty lines
+    lines = list(chain.from_iterable(
+        [(list(x[1]) if x[0] else [''])
+         for x in groupby(lines, key=lambda x: x.strip() != '')]))
+
+    return lines
+
+
+def _line_type(line):
+    """
+    Classify each line and say which of them
+    are text (0) and which of them are code (1).
+
+    A line is considered to be code,
+    if it starts with four spaces.
+
+    A line is considerer to be text if it is not
+    empty and is not code.
+
+    If line is empty, it is considered to be
+    code if it surrounded but two other code lines,
+    or if it is the first/last line and it has
+    code on the other side.
+    """
+    if line.strip() == '':
+        return UNDEFINED
+
+    # some line may start with spaces but still be not code.
+    # we need some heuristics here, but for the moment just
+    # whitelist such cases:
+    if line.strip().startswith('* ') or re.match(r'[0-9]+\.', line.strip()):
+        return TEXT
+
+    if line.startswith('   '):
+        return CODE
+    return TEXT
+
+
+
+def _classify_lines(lines):
+    line_types = [_line_type(line) for line in lines]
+
+    # pass 2:
+    # adding empty code lines to the code
+    for i in range(len(line_types) - 1):
+        if line_types[i] == CODE and line_types[i+1] == UNDEFINED:
+            line_types[i+1] = CODE_WHITESPACE
+            changed = True
+
+    for i in range(len(line_types) - 1)[::-1]:
+        if line_types[i] == UNDEFINED and line_types[i+1] == CODE:
+            line_types[i] = CODE_WHITESPACE
+            changed = True
+    line_types = [CODE if x == CODE_WHITESPACE else x for x in line_types]
+
+    # pass 3:
+    # fixing undefined line types (-1)
+    changed = True
+    while changed:
+        changed = False
+
+        # changing all lines types that are near the text
+
+        for i in range(len(line_types) - 1):
+            if line_types[i] == TEXT and line_types[i+1] == UNDEFINED:
+                line_types[i+1] = TEXT
+                changed = True
+
+        for i in range(len(line_types) - 1)[::-1]:
+            if line_types[i] == UNDEFINED and line_types[i+1] == TEXT:
+                line_types[i] = TEXT
+                changed = True
+
+    # everything what is still undefined, change to code type
+    line_types = [CODE if x == UNDEFINED else x for x in line_types]
+    return line_types
+
+def _unindent_code(line, shift=0):
+    if shift == -1 and line != '':
+        return ' ' + line
+
+    if shift > 0 and line.startswith(' '*shift):
+            return line[shift:]
+
+    return line
+
+def _wrap_lines(lines_classes, unindent_code=False):
+    """
+    Wrap classified lines. Add the split lines to the stream.
+    If `unindent_code` is True, remove leading four spaces.
+    """
+
+    result = []
+    for line_type,line_content in lines_classes:
+        if line_type == CODE:
+
+            shift = 3 if unindent_code else -1
+            result.append((line_type, _unindent_code(line_content, shift=shift)))
+        else:
+            if line_content.strip() == "":
+                result.append((line_type, ""))
+            for line in textwrap.fill(line_content).splitlines():
+                result.append((line_type, line))
+
+    return result
+
+def _run_vim_script(script_lines, text_lines):
+    """
+    Apply `script_lines` to `lines_classes`
+    and returns the result
+    """
+
+    script_vim = NamedTemporaryFile(delete=True)
+    textfile = NamedTemporaryFile(delete=True)
+
+    open(script_vim.name, "w").write("\n".join(script_lines))
+    open(textfile.name, "w").write("\n".join(text_lines))
+
+    script_vim.file.close()
+    textfile.file.close()
+
+    my_env = os.environ.copy()
+    my_env['HOME'] = PATH_VIM_ENVIRONMENT
+
+    cmd = ["script", "-q", "-c",
+           "vim -S %s %s" % (script_vim.name, textfile.name)]
+    Popen(cmd, shell=False, stdout=FNULL, stderr=FNULL, env=my_env).communicate()
+
+    return open(textfile.name, "r").read()
+
+def _commenting_script(lines_blocks, filetype):
+    script_lines = []
+    block_start = 1
+    for block in lines_blocks:
+        lines = list(block[1])
+
+        block_end = block_start + len(lines)-1
+
+        if block[0] == 0:
+            comment_type = 'sexy'
+            if block_end - block_start < 1 or filetype == 'ruby':
+                comment_type = 'comment'
+
+            script_lines.insert(0, "%s,%s call NERDComment(1, '%s')"
+                                % (block_start, block_end, comment_type))
+            script_lines.insert(0, "%s,%s call NERDComment(1, 'uncomment')"
+                                % (block_start, block_end))
+
+        block_start = block_end + 1
+
+    script_lines.insert(0, "set ft=%s" % _language_name(filetype))
+    script_lines.append("wq")
+
+    return script_lines
+
+def _beautify(text, filetype, add_comments=False, remove_text=False):
+    """
+    Main function that actually does the whole beautification job.
+    """
+
+    # We shift the code if and only if we either convert the text into comments
+    # or remove the text completely. Otherwise the code has to remain aligned
+    unindent_code = add_comments or remove_text
+    print(unindent_code)
+
+    lines = [x.rstrip('\n') for x in text.splitlines()]
+    lines = _cleanup_lines(lines)
+    lines_classes = zip(_classify_lines(lines), lines)
+    lines_classes = _wrap_lines(lines_classes, unindent_code=unindent_code)
+
+    if remove_text:
+        lines = [line[1] for line in lines_classes if line[0] == 1]
+        lines = _cleanup_lines(lines)
+        output = "\n".join(lines)
+        if not output.endswith('\n'):
+            output += "\n"
+    elif not add_comments:
+        output = "\n".join(line[1] for line in lines_classes)
+    else:
+        lines_blocks = groupby(lines_classes, key=lambda x: x[0])
+        script_lines = _commenting_script(lines_blocks, filetype)
+        output = _run_vim_script(
+            script_lines,
+            [line for (_, line) in lines_classes])
+
+    return output
+
+def code_blocks(text, wrap_lines=False, unindent_code=False):
+    """
+    Split `text` into blocks of text and code.
+    Return list of tuples TYPE, TEXT
+    """
+    lines = [x.rstrip('\n') for x in text.splitlines()]
+    lines_classes = zip(_classify_lines(lines), lines)
+
+    if wrap_lines:
+        lines_classes = _wrap_lines(lines_classes, unindent_code=unindent_code)
+
+    lines_blocks = groupby(lines_classes, key=lambda x: x[0])
+    answer = [(x[0], "\n".join([y[1] for y in x[1]])+"\n") for x in lines_blocks]
+    return answer
+
+
+def beautify(text, lang, options):
+    """
+    Process input `text` according to the specified `mode`.
+    Adds comments if needed, according to the `lang` rules.
+    Caches the results.
+    The whole work (except caching) is done by _beautify().
+    """
+
+    options = options or {}
+    beauty_options = dict((k, v) for k, v in options.items() if k in
+                          ['add_comments', 'remove_text'])
+
+    mode = ''
+    if beauty_options.get('add_comments'):
+        mode += 'c'
+    if beauty_options.get('remove_text'):
+        mode += 'q'
+
+    if beauty_options == {}:
+        # if mode is unknown, just don't transform the text at all
+        return text
+
+    digest = "t:%s:%s:%s" % (hashlib.md5(text).hexdigest(), lang, mode)
+    answer = REDIS.get(digest)
+    if answer:
+        return answer
+
+    answer = _beautify(text, lang, **beauty_options)
+
+    REDIS.set(digest, answer)
+    return answer
+
+def __main__():
+    text = sys.stdin.read()
+    filetype = sys.argv[1]
+    options = {
+        "": {},
+        "c": dict(add_comments=True),
+        "C": dict(add_comments=False),
+        "q": dict(remove_text=True),
+    }[sys.argv[2]]
+    result = beautify(text, filetype, options)
+    sys.stdout.write(result)
+
+if __name__ == '__main__':
+    __main__()
+<EOF>
+<BOF>
+"""
+Adapters for the cheat sheets from the Learn X in Y project
+"""
+from __future__ import print_function
+
+import os
+import re
+from globals import PATH_LEARNXINY
+
+class LearnXYAdapter(object):
+
+    """
+    Parent class of all languages adapters
+    """
+
+    _learn_xy_path = PATH_LEARNXINY
+    _replace_with = {}
+    _filename = ''
+    prefix = ''
+    _replace_with = {}
+    _splitted = True
+    _block_cut_start = 2
+    _block_cut_end = 0
+
+    def __init__(self):
+
+        self._whole_cheatsheet = self._read_cheatsheet()
+        self._blocks = self._extract_blocks()
+
+        self._topics_list = [x for x, _ in self._blocks]
+        if "Comments" in self._topics_list:
+            self._topics_list = [x for x in self._topics_list if x != "Comments"] + ["Comments"]
+        self._topics_list += [":learn"]
+        print(self.prefix, self._topics_list)
+
+    def _is_block_separator(self, before, now, after):
+        if (re.match(r'////////*', before)
+                and re.match(r'// ', now)
+                and re.match(r'////////*', after)):
+            block_name = re.sub(r'//\s*', '', now).replace('(', '').replace(')', '')
+            block_name = '_'.join(block_name.strip(", ").split())
+            for character in '/,':
+                block_name = block_name.replace(character, '')
+            for k in self._replace_with:
+                if k in block_name:
+                    block_name = self._replace_with[k]
+            return block_name
+        return None
+
+    def _cut_block(self, block, start_block=False):
+        if not start_block:
+            answer = block[self._block_cut_start:-self._block_cut_end]
+        if answer == []:
+            return answer
+        if answer[0].strip() == '':
+            answer = answer[1:]
+        if answer[-1].strip() == '':
+            answer = answer[:1]
+        return answer
+
+    def _read_cheatsheet(self):
+        filename = os.path.join(self._learn_xy_path, self._filename)
+
+        with open(filename) as f_cheat_sheet:
+            code_mode = False
+            answer = []
+            for line in f_cheat_sheet.readlines():
+                if line.startswith('```'):
+                    if not code_mode:
+                        code_mode = True
+                        continue
+                    else:
+                        code_mode = False
+                if code_mode:
+                    answer.append(line.rstrip('\n'))
+            return answer
+
+    def _extract_blocks(self):
+
+        if not self._splitted:
+            return []
+
+        lines = self._whole_cheatsheet
+        answer = []
+
+        block = []
+        block_name = "Comments"
+        for before, now, after in zip([""]+lines, lines, lines[1:]):
+            new_block_name = self._is_block_separator(before, now, after)
+            if new_block_name:
+                if block_name:
+                    block_text = self._cut_block(block)
+                    if block_text != []:
+                        answer.append((block_name, block_text))
+                block_name = new_block_name
+                block = []
+                continue
+            else:
+                block.append(before)
+
+        answer.append((block_name, self._cut_block(block)))
+        return answer
+
+    def is_valid(self, name):
+        """
+        Check whether topic `name` is valid.
+        """
+
+        for topic_list in self._topics_list:
+            if topic_list == name:
+                return True
+        return False
+
+    def get_list(self, prefix=False):
+        """
+        Get list of topics for `prefix`
+        """
+        if prefix:
+            return ["%s/%s" % (self.prefix, x) for x in self._topics_list]
+        return self._topics_list
+
+    def get_cheat_sheet(self, name, partial=False):
+        """
+        Return specified cheat sheet `name` for the language.
+        If `partial`, cheat sheet name may be shortened
+        """
+
+        if name == ":list":
+            return "\n".join(self.get_list()) + "\n"
+
+        if name == ":learn":
+            return "\n".join(self._whole_cheatsheet) + "\n"
+
+        if partial:
+            possible_names = []
+            for block_name, _ in self._blocks:
+                if block_name.startswith(name):
+                    possible_names.append(block_name)
+            if possible_names == [] or len(possible_names) > 1:
+                return None
+            name = possible_names[0]
+
+        for block_name, block_contents in self._blocks:
+            if block_name == name:
+
+                print("\n".join(block_contents))
+                print(name)
+                return "\n".join(block_contents)
+
+        return None
+
+#
+# Specific programming languages LearnXY cheat sheets configurations
+# Contains much code for the moment; should contain data only
+# ideally should be replaced with YAML
+#
+
+class LearnAwkAdapter(LearnXYAdapter):
+    "Learn AWK in Y Minutes"
+    prefix = "awk"
+    _filename = "awk.html.markdown"
+    _splitted = False
+
+class LearnBashAdapter(LearnXYAdapter):
+    "Learn Bash in Y Minutes"
+    prefix = "bash"
+    _filename = "bash.html.markdown"
+    _splitted = False
+
+class LearnBfAdapter(LearnXYAdapter):
+    "Learn Brainfuck in Y Minutes"
+    prefix = "bf"
+    _filename = "bf.html.markdown"
+    _splitted = False
+
+class LearnCAdapter(LearnXYAdapter):
+    "Learn C in Y Minutes"
+    prefix = "c"
+    _filename = "c.html.markdown"
+    _splitted = False
+
+class LearnChapelAdapter(LearnXYAdapter):
+    "Learn Chapel in Y Minutes"
+    prefix = "chapel"
+    _filename = "chapel.html.markdown"
+    _splitted = False
+
+class LearnClojureAdapter(LearnXYAdapter):
+    """
+    Learn Clojure in Y Minutes
+    """
+
+    prefix = "clojure"
+    _filename = "clojure.html.markdown"
+
+    def _is_block_separator(self, before, now, after):
+        if (re.match(r'\s*$', before)
+                and re.match(r';\s*', now)
+                and re.match(r';;;;;;+', after)):
+            block_name = re.sub(r';\s*', '', now)
+            block_name = '_'.join([x.strip(",&:") for x in  block_name.strip(", ").split()])
+            return block_name
+        return None
+
+    @staticmethod
+    def _cut_block(block, start_block=False):
+        if not start_block:
+            answer = block[2:]
+        if answer[0].split() == '':
+            answer = answer[1:]
+        if answer[-1].split() == '':
+            answer = answer[:1]
+        return answer
+
+class LearnCoffeeScriptAdapter(LearnXYAdapter):
+    "Learn coffeescript in Y Minutes"
+    prefix = "coffee"
+    _filename = "coffeescript.html.markdown"
+    _splitted = False
+
+class LearnCppAdapter(LearnXYAdapter):
+    """
+    Learn C++ in Y Minutes
+    """
+
+    prefix = "cpp"
+    _filename = "c++.html.markdown"
+    _replace_with = {
+        'More_about_Objects': 'Prototypes',
+    }
+
+    def _is_block_separator(self, before, now, after):
+        if (re.match(r'////////*', before)
+                and re.match(r'// ', now)
+                and re.match(r'////////*', after)):
+            block_name = re.sub(r'//\s*', '', now).replace('(', '').replace(')', '')
+            block_name = '_'.join(block_name.strip(", ").split())
+            for character in '/,':
+                block_name = block_name.replace(character, '')
+            for k in self._replace_with:
+                if k in block_name:
+                    block_name = self._replace_with[k]
+            return block_name
+        return None
+
+    @staticmethod
+    def _cut_block(block, start_block=False):
+        answer = block[2:-1]
+        if answer == []:
+            return answer
+        if answer[0].split() == '':
+            answer = answer[1:]
+        if answer[-1].split() == '':
+            answer = answer[:1]
+        return answer
+
+class LearnCsharpAdapter(LearnXYAdapter):
+    "Learn C# in Y Minutes"
+    prefix = "csharp"
+    _filename = "csharp.html.markdown"
+    _splitted = False
+
+class LearnDAdapter(LearnXYAdapter):
+    "Learn D in Y Minutes"
+    prefix = "d"
+    _filename = "d.html.markdown"
+    _splitted = False
+
+class LearnDartAdapter(LearnXYAdapter):
+    "Learn Dart in Y Minutes"
+    prefix = "dart"
+    _filename = "dart.html.markdown"
+    _splitted = False
+
+class LearnFactorAdapter(LearnXYAdapter):
+    "Learn Factor in Y Minutes"
+    prefix = "factor"
+    _filename = "factor.html.markdown"
+    _splitted = False
+
+class LearnForthAdapter(LearnXYAdapter):
+    "Learn Forth in Y Minutes"
+    prefix = "forth"
+    _filename = "forth.html.markdown"
+    _splitted = False
+
+class LearnFsharpAdapter(LearnXYAdapter):
+    "Learn F# in Y Minutes"
+    prefix = "fsharp"
+    _filename = "fsharp.html.markdown"
+    _splitted = False
+
+class LearnElispAdapter(LearnXYAdapter):
+    "Learn Elisp in Y Minutes"
+    prefix = "elisp"
+    _filename = "elisp.html.markdown"
+    _splitted = False
+
+class LearnElixirAdapter(LearnXYAdapter):
+    """
+    Learn Elixir in Y Minutes
+    """
+
+    prefix = "elixir"
+    _filename = "elixir.html.markdown"
+    _replace_with = {
+        'More_about_Objects': 'Prototypes',
+    }
+
+    def _is_block_separator(self, before, now, after):
+        if (re.match(r'## ---*', before)
+                and re.match(r'## --', now)
+                and re.match(r'## ---*', after)):
+            block_name = re.sub(r'## --\s*', '', now)
+            block_name = '_'.join(block_name.strip(", ").split())
+            for character in '/,':
+                block_name = block_name.replace(character, '')
+            for k in self._replace_with:
+                if k in block_name:
+                    block_name = self._replace_with[k]
+            return block_name
+        return None
+
+    @staticmethod
+    def _cut_block(block, start_block=False):
+        answer = block[2:-1]
+        if answer[0].split() == '':
+            answer = answer[1:]
+        if answer[-1].split() == '':
+            answer = answer[:1]
+        return answer
+
+class LearnElmAdapter(LearnXYAdapter):
+    """
+    Learn Elm in Y Minutes
+    """
+
+    prefix = "elm"
+    _filename = "elm.html.markdown"
+    _replace_with = {
+        'More_about_Objects': 'Prototypes',
+    }
+
+    def _is_block_separator(self, before, now, after):
+        if (re.match(r'\s*', before)
+                and re.match(r'\{--.*--\}', now)
+                and re.match(r'\s*', after)):
+            block_name = re.sub(r'\{--+\s*', '', now)
+            block_name = re.sub(r'--\}', '', block_name)
+            block_name = '_'.join(block_name.strip(", ").split())
+            for character in '/,':
+                block_name = block_name.replace(character, '')
+            for k in self._replace_with:
+                if k in block_name:
+                    block_name = self._replace_with[k]
+            return block_name
+        return None
+
+    @staticmethod
+    def _cut_block(block, start_block=False):
+        answer = block[2:-1]
+        if answer[0].split() == '':
+            answer = answer[1:]
+        if answer[-1].split() == '':
+            answer = answer[:1]
+        return answer
+
+class LearnErlangAdapter(LearnXYAdapter):
+    """
+    Learn Erlang in Y Minutes
+    """
+
+    prefix = "erlang"
+    _filename = "erlang.html.markdown"
+
+    def _is_block_separator(self, before, now, after):
+        if (re.match('%%%%%%+', before)
+                and re.match(r'%%\s+[0-9]+\.', now)
+                and re.match('%%%%%%+', after)):
+            block_name = re.sub(r'%%+\s+[0-9]+\.\s*', '', now)
+            block_name = '_'.join(block_name.strip('.').strip().split())
+            return block_name
+        return None
+
+    @staticmethod
+    def _cut_block(block, start_block=False):
+        answer = block[2:-1]
+        if answer[0].split() == '':
+            answer = answer[1:]
+        if answer[-1].split() == '':
+            answer = answer[:1]
+        return answer
+
+class LearnFortranAdapter(LearnXYAdapter):
+    "Learn Fortran in Y Minutes"
+    prefix = "fortran"
+    _filename = "fortran95.html.markdown"
+    _splitted = False
+
+class LearnGoAdapter(LearnXYAdapter):
+    "Learn Go in Y Minutes"
+    prefix = "go"
+    _filename = "go.html.markdown"
+    _splitted = False
+
+class LearnGroovyAdapter(LearnXYAdapter):
+    "Learn Groovy in Y Minutes"
+    prefix = "groovy"
+    _filename = "groovy.html.markdown"
+    _splitted = False
+
+class LearnJavaAdapter(LearnXYAdapter):
+    "Learn Java in Y Minutes"
+    prefix = "java"
+    _filename = "java.html.markdown"
+    _splitted = False
+
+class LearnJavaScriptAdapter(LearnXYAdapter):
+    """
+    Learn JavaScript in Y Minutes
+    """
+    prefix = "js"
+    _filename = "javascript.html.markdown"
+    _replace_with = {
+        'More_about_Objects': 'Prototypes',
+    }
+
+    def _is_block_separator(self, before, now, after):
+        if (re.match('//////+', before)
+                and re.match(r'//+\s+[0-9]+\.', now)
+                and re.match(r'\s*', after)):
+            block_name = re.sub(r'//+\s+[0-9]+\.\s*', '', now)
+            block_name = '_'.join(block_name.strip(", ").split())
+            for k in self._replace_with:
+                if k in block_name:
+                    block_name = self._replace_with[k]
+            return block_name
+        return None
+
+    @staticmethod
+    def _cut_block(block, start_block=False):
+        answer = block[2:-1]
+        if answer[0].split() == '':
+            answer = answer[1:]
+        if answer[-1].split() == '':
+            answer = answer[:1]
+        return answer
+
+class LearnJuliaAdapter(LearnXYAdapter):
+    """
+    Learn Julia in Y Minutes
+    """
+    prefix = "julia"
+    _filename = "julia.html.markdown"
+
+    def _is_block_separator(self, before, now, after):
+        if (re.match('####+', before)
+                and re.match(r'##\s*', now)
+                and re.match('####+', after)):
+            block_name = re.sub(r'##\s+[0-9]+\.\s*', '', now)
+            block_name = '_'.join(block_name.strip(", ").split())
+            return block_name
+        return None
+
+    @staticmethod
+    def _cut_block(block, start_block=False):
+        answer = block[2:-1]
+        if answer[0].split() == '':
+            answer = answer[1:]
+        if answer[-1].split() == '':
+            answer = answer[:1]
+        return answer
+
+class LearnHaskellAdapter(LearnXYAdapter):
+    """
+    Learn Haskell in Y Minutes
+    """
+    prefix = "haskell"
+    _filename = "haskell.html.markdown"
+    _replace_with = {
+        'More_about_Objects': 'Prototypes',
+    }
+
+    def _is_block_separator(self, before, now, after):
+        if (re.match('------+', before)
+                and re.match(r'--+\s+[0-9]+\.', now)
+                and re.match('------+', after)):
+            block_name = re.sub(r'--+\s+[0-9]+\.\s*', '', now)
+            block_name = '_'.join(block_name.strip(", ").split())
+            for k in self._replace_with:
+                if k in block_name:
+                    block_name = self._replace_with[k]
+            return block_name
+        return None
+
+    @staticmethod
+    def _cut_block(block, start_block=False):
+        answer = block[2:-1]
+        if answer[0].split() == '':
+            answer = answer[1:]
+        if answer[-1].split() == '':
+            answer = answer[:1]
+        return answer
+
+class LearnLispAdapter(LearnXYAdapter):
+    "Learn Lisp in Y Minutes"
+    prefix = "lisp"
+    _filename = "common-lisp.html.markdown"
+    _splitted = False
+
+class LearnLuaAdapter(LearnXYAdapter):
+    """
+    Learn Lua in Y Minutes
+    """
+    prefix = "lua"
+    _filename = "lua.html.markdown"
+    _replace_with = {
+        '1_Metatables_and_metamethods': 'Metatables',
+        '2_Class-like_tables_and_inheritance': 'Class-like_tables',
+        'Variables_and_flow_control': 'Flow_control',
+    }
+
+    def _is_block_separator(self, before, now, after):
+        if (re.match('-----+', before)
+                and re.match('-------+', after)
+                and re.match(r'--\s+[0-9]+\.', now)):
+            block_name = re.sub(r'--+\s+[0-9]+\.\s*', '', now)
+            block_name = '_'.join(block_name.strip('.').strip().split())
+            if block_name in self._replace_with:
+                block_name = self._replace_with[block_name]
+            return block_name
+        return None
+
+    @staticmethod
+    def _cut_block(block, start_block=False):
+        answer = block[2:-1]
+        if answer[0].split() == '':
+            answer = answer[1:]
+        if answer[-1].split() == '':
+            answer = answer[:1]
+        return answer
+
+class LearnMathematicaAdapter(LearnXYAdapter):
+    "Learn Mathematica in Y Minutes"
+    prefix = "mathematica"
+    _filename = "wolfram.html.markdown"
+    _splitted = False
+
+class LearnMatlabAdapter(LearnXYAdapter):
+    "Learn Matlab in Y Minutes"
+    prefix = "matlab"
+    _filename = "matlab.html.markdown"
+    _splitted = False
+
+class LearnKotlinAdapter(LearnXYAdapter):
+    """
+    Learn Kotlin in Y Minutes
+    """
+    prefix = "kotlin"
+    _filename = "kotlin.html.markdown"
+
+    def _is_block_separator(self, before, now, after):
+        if (re.match('#######+', before)
+                and re.match('#######+', after)
+                and re.match(r'#+\s+[0-9]+\.', now)):
+            block_name = re.sub(r'#+\s+[0-9]+\.\s*', '', now)
+            block_name = '_'.join(block_name.strip().split())
+            return block_name
+        return None
+
+    @staticmethod
+    def _cut_block(block, start_block=False):
+        answer = block[2:-1]
+        if answer[0].split() == '':
+            answer = answer[1:]
+        if answer[-1].split() == '':
+            answer = answer[:1]
+        return answer
+
+class LearnObjectiveCAdapter(LearnXYAdapter):
+    "Learn Objective C in Y Minutes"
+    prefix = "objective-c"
+    _filename = "objective-c.html.markdown"
+    _splitted = False
+
+class LearnOCamlAdapter(LearnXYAdapter):
+    """
+    Learn OCaml in Y Minutes
+    """
+    prefix = "ocaml"
+    _filename = "ocaml.html.markdown"
+    _replace_with = {
+        'More_about_Objects': 'Prototypes',
+    }
+
+    def _is_block_separator(self, before, now, after):
+        if (re.match(r'\s*', before)
+                and re.match(r'\(\*\*\*+', now)
+                and re.match(r'\s*', after)):
+            block_name = re.sub(r'\(\*\*\*+\s*', '', now)
+            block_name = re.sub(r'\s*\*\*\*\)', '', block_name)
+            block_name = '_'.join(block_name.strip(", ").split())
+            for k in self._replace_with:
+                if k in block_name:
+                    block_name = self._replace_with[k]
+            return block_name
+        return None
+
+    @staticmethod
+    def _cut_block(block, start_block=False):
+        answer = block[2:-1]
+        if answer[0].split() == '':
+            answer = answer[1:]
+        if answer[-1].split() == '':
+            answer = answer[:1]
+        return answer
+
+class LearnPerlAdapter(LearnXYAdapter):
+    """
+    Learn Perl in Y Minutes
+    """
+    prefix = "perl"
+    _filename = "perl.html.markdown"
+    _replace_with = {
+        'Conditional_and_looping_constructs': 'Control_Flow',
+        'Perl_variable_types': 'Types',
+        'Files_and_I/O': 'Files',
+        'Writing_subroutines': 'Subroutines',
+    }
+
+    def _is_block_separator(self, before, now, after):
+        if re.match(r'####+\s+', now):
+            block_name = re.sub(r'#+\s', '', now)
+            block_name = '_'.join(block_name.strip().split())
+            if block_name in self._replace_with:
+                block_name = self._replace_with[block_name]
+            return block_name
+        else:
+            return None
+
+    @staticmethod
+    def _cut_block(block, start_block=False):
+        if not start_block:
+            answer = block[2:]
+        if answer == []:
+            return answer
+        if answer[0].split() == '':
+            answer = answer[1:]
+        if answer[-1].split() == '':
+            answer = answer[:1]
+        return answer
+
+class LearnPerl6Adapter(LearnXYAdapter):
+    "Learn Perl 6 in Y Minutes"
+    prefix = "perl6"
+    _filename = "perl6.html.markdown"
+    _splitted = False
+
+class LearnPHPAdapter(LearnXYAdapter):
+    """
+    Learn PHP in Y Minutes
+    """
+    prefix = "php"
+    _filename = "php.html.markdown"
+
+    def _is_block_separator(self, before, now, after):
+        if (re.match(r'/\*\*\*\*\*+', before)
+                and re.match(r'\s*\*/', after)
+                and re.match(r'\s*\*\s*', now)):
+            block_name = re.sub(r'\s*\*\s*', '', now)
+            block_name = re.sub(r'&', '', block_name)
+            block_name = '_'.join(block_name.strip().split())
+            return block_name
+        return None
+
+    @staticmethod
+    def _cut_block(block, start_block=False):
+        return block[2:]
+
+class LearnPythonAdapter(LearnXYAdapter):
+    """
+    Learn Python in Y Minutes
+    """
+    prefix = "python"
+    _filename = "python.html.markdown"
+
+    def _is_block_separator(self, before, now, after):
+        if (re.match('#######+', before)
+                and re.match('#######+', after)
+                and re.match(r'#+\s+[0-9]+\.', now)):
+            block_name = re.sub(r'#+\s+[0-9]+\.\s*', '', now)
+            block_name = '_'.join(block_name.strip().split())
+            return block_name
+        return None
+
+    @staticmethod
+    def _cut_block(block, start_block=False):
+        answer = block[2:-1]
+        if answer[0].split() == '':
+            answer = answer[1:]
+        if answer[-1].split() == '':
+            answer = answer[:1]
+        return answer
+
+class LearnPython3Adapter(LearnXYAdapter):
+    "Learn Python 3 in Y Minutes"
+    prefix = "python3"
+    _filename = "python3.html.markdown"
+    _splitted = False
+
+class LearnRAdapter(LearnXYAdapter):
+    "Learn R in Y Minutes"
+    prefix = "r"
+    _filename = "r.html.markdown"
+    _splitted = False
+
+class LearnRacketAdapter(LearnXYAdapter):
+    "Learn Racket in Y Minutes"
+    prefix = "racket"
+    _filename = "racket.html.markdown"
+    _splitted = False
+
+class LearnRubyAdapter(LearnXYAdapter):
+    """
+    Learn Ruby in Y Minutes
+
+    Format of the file was changed, so we have to fix the function too.
+    This case is a good case for health check:
+    if number of extracted cheat sheets is suddenly became 1,
+    one should check the markup
+    """
+    prefix = "ruby"
+    _filename = "ruby.html.markdown"
+
+    def _is_block_separator(self, before, now, after):
+        if (re.match('#######+', before)
+                and re.match('#######+', after)
+                and re.match(r'#+\s+[0-9]+\.', now)):
+            block_name = re.sub(r'#+\s+[0-9]+\.\s*', '', now)
+            block_name = '_'.join(block_name.strip().split())
+            return block_name
+        return None
+
+    @staticmethod
+    def _cut_block(block, start_block=False):
+        answer = block[2:-1]
+        if answer[0].split() == '':
+            answer = answer[1:]
+        if answer[-1].split() == '':
+            answer = answer[:1]
+        return answer
+
+class LearnRustAdapter(LearnXYAdapter):
+    "Learn Rust in Y Minutes"
+    prefix = "rust"
+    _filename = "rust.html.markdown"
+    _splitted = False
+
+class LearnSolidityAdapter(LearnXYAdapter):
+    "Learn Solidity in Y Minutes"
+    prefix = "solidity"
+    _filename = "solidity.html.markdown"
+    _splitted = False
+
+class LearnSwiftAdapter(LearnXYAdapter):
+    "Learn Swift in Y Minutes"
+    prefix = "swift"
+    _filename = "swift.html.markdown"
+    _splitted = False
+
+class LearnTclAdapter(LearnXYAdapter):
+    "Learn Tcl in Y Minutes"
+    prefix = "tcl"
+    _filename = "tcl.html.markdown"
+    _splitted = False
+
+class LearnTcshAdapter(LearnXYAdapter):
+    "Learn Tcsh in Y Minutes"
+    prefix = "tcsh"
+    _filename = "tcsh.html.markdown"
+    _splitted = False
+
+class LearnVisualBasicAdapter(LearnXYAdapter):
+    "Learn Visual Basic in Y Minutes"
+    prefix = "vb"
+    _filename = "visualbasic.html.markdown"
+    _splitted = False
+
+ADAPTERS = {cls.prefix: cls() for cls in vars()['LearnXYAdapter'].__subclasses__()}
+
+def get_learnxiny(topic):
+    """
+    Return cheat sheet for `topic`
+    or empty string if nothing found
+    """
+    lang, topic = topic.split('/', 1)
+    if lang not in ADAPTERS:
+        return ''
+    return ADAPTERS[lang].get_cheat_sheet(topic)
+
+def get_learnxiny_list():
+    """
+    Return list of all learnxiny topics
+    """
+    answer = []
+    for language_adapter in ADAPTERS.values():
+        answer += language_adapter.get_list(prefix=True)
+    return answer
+
+def is_valid_learnxy(topic):
+    """
+    Return whether `topic` is a valid learnxiny topic
+    """
+
+    lang, topic = topic.split('/', 1)
+    if lang not in ADAPTERS:
+        return False
+
+    return ADAPTERS[lang].is_valid(topic)
+<EOF>
+<BOF>
+"""
+Parse query arguments.
+"""
+
+def parse_args(args):
+    """
+    Parse arguments and options.
+    Replace short options with their long counterparts.
+    """
+    result = {
+        'add_comments':  True,
+    }
+
+    query = ""
+    for key, val in args.items():
+        if val == "" or val == []:
+            query += key
+            continue
+
+    options_meaning = {
+        "c": dict(add_comments=False, unindent_code=False),
+        "C": dict(add_comments=False, unindent_code=True),
+        "Q": dict(remove_text=True),
+        'q': dict(quiet=True),
+        'T': {'no-terminal': True},
+    }
+    for option, meaning in options_meaning.items():
+        if option in query:
+            result.update(meaning)
+
+    for key, val in args.items():
+        if val == 'True':
+            val = True
+        if val == 'False':
+            val = False
+        result[key] = val
+
+    return result
+<EOF>
+<BOF>
+"""
+Main cheat.sh wrapper.
+Get answers from getters (in get_answer), adds syntax highlighting
+or html markup and returns the result.
+"""
+
+from gevent.monkey import patch_all
+from gevent.subprocess import Popen, PIPE
+patch_all()
+
+# pylint: disable=wrong-import-position,wrong-import-order
+import sys
+import os
+import re
+
+import colored
+from pygments import highlight as pygments_highlight
+from pygments.formatters import Terminal256Formatter # pylint: disable=no-name-in-module
+
+MYDIR = os.path.abspath(os.path.join(__file__, '..', '..'))
+sys.path.append("%s/lib/" % MYDIR)
+from globals import error, ANSI2HTML, COLOR_STYLES, GITHUB_REPOSITORY
+from buttons import TWITTER_BUTTON, GITHUB_BUTTON, GITHUB_BUTTON_FOOTER
+from languages_data import LEXER, get_lexer_name
+from get_answer import get_topic_type, get_topics_list, get_answer, find_answer_by_keyword
+from beautifier import code_blocks
+# import beautifier
+# pylint: disable=wrong-import-position,wrong-import-order
+
+ANSI_ESCAPE = re.compile(r'(\x9B|\x1B\[)[0-?]*[ -\/]*[@-~]')
+def remove_ansi(sometext):
+    """
+    Remove ANSI sequences from `sometext` and convert it into plaintext.
+    """
+    return ANSI_ESCAPE.sub('', sometext)
+
+def html_wrapper(data):
+    """
+    Convert ANSI text `data` to HTML
+    """
+    proc = Popen(
+        ["bash", ANSI2HTML, "--palette=solarized", "--bg=dark"],
+        stdin=PIPE, stdout=PIPE, stderr=PIPE)
+    data = data.encode('utf-8')
+    stdout, stderr = proc.communicate(data)
+    if proc.returncode != 0:
+        error(stdout + stderr)
+    return stdout.decode('utf-8')
+
+def _colorize_internal(topic, answer, html_needed):
+
+    def _colorize_line(line):
+        if line.startswith('T'):
+            line = colored.fg("grey_62") + line + colored.attr('reset')
+            line = re.sub(r"\{(.*?)\}", colored.fg("orange_3") + r"\1"+colored.fg('grey_35'), line)
+            return line
+
+        line = re.sub(r"\[(F.*?)\]",
+                      colored.bg("black") + colored.fg("cyan") + r"[\1]"+colored.attr('reset'),
+                      line)
+        line = re.sub(r"\[(g.*?)\]",
+                      colored.bg("dark_gray") \
+                      + colored.fg("grey_0") \
+                      + r"[\1]"+colored.attr('reset'),
+                      line)
+        line = re.sub(r"\{(.*?)\}",
+                      colored.fg("orange_3") + r"\1"+colored.attr('reset'),
+                      line)
+        line = re.sub(r"<(.*?)>",
+                      colored.fg("cyan") + r"\1"+colored.attr('reset'),
+                      line)
+        return line
+
+    if topic in [':list', ':bash_completion']:
+        return answer
+
+    if topic == ':firstpage-v1':
+        lines = answer.splitlines()
+        answer_lines = lines[:9]
+        answer_lines.append(colored.fg('grey_35')+lines[9]+colored.attr('reset'))
+        for line in lines[10:]:
+            answer_lines.append(_colorize_line(line))
+        if html_needed:
+            answer_lines = answer_lines[:-2]
+        answer = "\n".join(answer_lines) + "\n"
+
+    return answer
+
+def _colorize_ansi_answer(topic, answer, color_style,               # pylint: disable=too-many-arguments
+                          highlight_all=True, highlight_code=False,
+                          unindent_code=False):
+
+    color_style = color_style or "native"
+    lexer_class = LEXER['bash']
+    if '/' in topic:
+        section_name = topic.split('/', 1)[0].lower()
+        section_name = get_lexer_name(section_name)
+        lexer_class = LEXER.get(section_name, lexer_class)
+        if section_name == 'php':
+            answer = "<?\n%s?>\n" % answer
+
+    if highlight_all:
+        highlight = lambda answer: pygments_highlight(
+            answer, lexer_class(), Terminal256Formatter(style=color_style)).strip('\n')+'\n'
+    else:
+        highlight = lambda x: x
+
+    if highlight_code:
+        blocks = code_blocks(answer, wrap_lines=True, unindent_code=(4 if unindent_code else False))
+        highlighted_blocks = []
+        for block in blocks:
+            if block[0] == 1:
+                this_block = highlight(block[1])
+            else:
+                this_block = block[1].strip('\n')+'\n'
+            highlighted_blocks.append(this_block)
+
+        result = "\n".join(highlighted_blocks)
+    else:
+        result = highlight(answer).lstrip('\n')
+    return result
+
+def _github_button(topic_type):
+
+    full_name = GITHUB_REPOSITORY.get(topic_type, '')
+    if not full_name:
+        return ''
+
+    short_name = full_name.split('/', 1)[1] # pylint: disable=unused-variable
+
+    button = (
+        "<!-- Place this tag where you want the button to render. -->"
+        '<a aria-label="Star %(full_name)s on GitHub"'
+        ' data-count-aria-label="# stargazers on GitHub"'
+        ' data-count-api="/repos/%(full_name)s#stargazers_count"'
+        ' data-count-href="/%(full_name)s/stargazers"'
+        ' data-icon="octicon-star"'
+        ' href="https://github.com/%(full_name)s"'
+        '  class="github-button">%(short_name)s</a>'
+    ) % locals()
+    return button
+
+def _render_html(query, result, editable, repository_button, request_options):
+
+    result = result + "\n$"
+    result = html_wrapper(result)
+    title = "<title>cheat.sh/%s</title>" % query
+    # title += ('\n<link rel="stylesheet" href="/files/awesomplete.css" />script'
+    #           ' src="/files/awesomplete.min.js" async></script>')
+    # submit button: thanks to http://stackoverflow.com/questions/477691/
+    submit_button = ('<input type="submit" style="position: absolute;'
+                     ' left: -9999px; width: 1px; height: 1px;" tabindex="-1" />')
+    topic_list = ('<datalist id="topics">%s</datalist>'
+                  % ("\n".join("<option value='%s'></option>" % x for x in get_topics_list())))
+
+    curl_line = "<span class='pre'>$ curl cheat.sh/</span>"
+    if query == ':firstpage':
+        query = ""
+    form_html = ('<form action="/" method="GET"/>'
+                 '%s%s'
+                 '<input'
+                 ' type="text" value="%s" name="topic"'
+                 ' list="topics" autofocus autocomplete="off"/>'
+                 '%s'
+                 '</form>') \
+                 % (submit_button, curl_line, query, topic_list)
+
+    edit_button = ''
+    if editable:
+        # It's possible that topic directory starts with omitted underscore
+        if '/' in query:
+            query = '_' + query
+        edit_page_link = 'https://github.com/chubin/cheat.sheets/edit/master/sheets/' + query
+        edit_button = (
+            '<pre style="position:absolute;padding-left:40em;overflow:visible;height:0;">'
+            '[<a href="%s" style="color:cyan">edit</a>]'
+            '</pre>') % edit_page_link
+    result = re.sub("<pre>", edit_button + form_html + "<pre>", result)
+    result = re.sub("<head>", "<head>" + title, result)
+    if not request_options.get('quiet'):
+        result = result.replace('</body>',
+                                TWITTER_BUTTON \
+                                + GITHUB_BUTTON \
+                                + repository_button \
+                                + GITHUB_BUTTON_FOOTER \
+                                + '</body>')
+    return result
+
+def _visualize(query, keyword, answers, request_options, html=None): # pylint: disable=too-many-locals
+
+    search_mode = bool(keyword)
+
+    highlight = not bool(request_options and request_options.get('no-terminal'))
+    color_style = request_options.get('style', '')
+    if color_style not in COLOR_STYLES:
+        color_style = ''
+
+    found = True            # if the page was found in the database
+    editable = False        # can generated page be edited on github (only cheat.sheets pages can)
+    result = ""
+    for topic, answer in answers:   # pylint: disable=too-many-nested-blocks
+
+        if topic == 'LIMITED':
+            result += colored.bg('dark_goldenrod') \
+                    + colored.fg('yellow_1') \
+                    + ' ' +  answer + ' ' \
+                    + colored.attr('reset') + "\n"
+            break
+
+        topic_type = get_topic_type(topic)
+        highlight = (highlight
+                     and topic not in [":list", ":bash_completion"]
+                     and topic_type not in ["unknown"]
+                    )
+        found = found and not topic_type == 'unknown'
+        editable = editable or topic_type == "cheat.sheets"
+
+        if topic_type == "internal" and highlight:
+            answer = _colorize_internal(topic, answer, html)
+        elif topic_type == "late.nz":
+            pass
+        else:
+            answer = _colorize_ansi_answer(
+                topic, answer, color_style,
+                highlight_all=highlight,
+                highlight_code=(topic_type == 'question'
+                                and not request_options.get('add_comments')
+                                and not request_options.get('remove_text')),
+                unindent_code=request_options.get('unindent_code')
+                )
+
+        if search_mode:
+            if not highlight:
+                result += "\n[%s]\n" % topic
+            else:
+                result += "\n%s%s %s %s%s\n" % (colored.bg('dark_gray'),
+                                                colored.attr("res_underlined"),
+                                                topic,
+                                                colored.attr("res_underlined"),
+                                                colored.attr('reset'))
+        result += answer
+
+    result = result.strip('\n') + "\n"
+
+    if search_mode:
+        editable = False
+        repository_button = ''
+    else:
+        repository_button = _github_button(topic_type)
+
+    if html and query:
+        result = _render_html(
+            query, result, editable, repository_button, request_options)
+
+
+    return result, found
+
+def _sanitize_query(query):
+    return re.sub('[<>"]', '', query)
+
+def cheat_wrapper(query, request_options=None, html=False):
+    """
+    Giant megafunction that delivers cheat sheet for `query`.
+    If `html` is True, the answer is formatted as HTML.
+    Additional request options specified in `request_options`.
+
+    This function is really really bad, and should be rewritten
+    as soon as possible.
+    """
+
+    def _strip_hyperlink(query):
+        return re.sub('(,[0-9]+)+$', '', query)
+
+    def _parse_query(query):
+        topic = query
+        keyword = None
+        search_options = ""
+
+        keyword = None
+        if '~' in query:
+            topic = query
+            pos = topic.index('~')
+            keyword = topic[pos+1:]
+            topic = topic[:pos]
+
+            if '/' in keyword:
+                search_options = keyword[::-1]
+                search_options = search_options[:search_options.index('/')]
+                keyword = keyword[:-len(search_options)-1]
+
+        return topic, keyword, search_options
+
+    query = _sanitize_query(query)
+
+    # at the moment, we just remove trailing slashes
+    # so queries python/ and python are equal
+    query = _strip_hyperlink(query.rstrip('/'))
+    topic, keyword, search_options = _parse_query(query)
+
+    if keyword:
+        answers = find_answer_by_keyword(
+            topic, keyword, options=search_options, request_options=request_options)
+    else:
+        answers = [(topic, get_answer(topic, keyword, request_options=request_options))]
+
+    return _visualize(query, keyword, answers, request_options, html=html)
+<EOF>
+<BOF>
+TWITTER_BUTTON = """
+<a href="https://twitter.com/igor_chubin" class="twitter-follow-button" data-show-count="false" data-button="grey">Follow @igor_chubin</a>
+<script>!function(d,s,id){var js,fjs=d.getElementsByTagName(s)[0],p=/^http:/.test(d.location)?'http':'https';if(!d.getElementById(id)){js=d.createElement(s);js.id=id;js.src=p+'://platform.twitter.com/widgets.js';fjs.parentNode.insertBefore(js,fjs);}}(document, 'script', 'twitter-wjs');</script>
+"""
+
+GITHUB_BUTTON = """
+<!-- Place this tag where you want the button to render. -->
+<a aria-label="Star chubin/wttr.in on GitHub" data-count-aria-label="# stargazers on GitHub" data-count-api="/repos/chubin/cheat.sh#stargazers_count" data-count-href="/chubin/cheat.sh/stargazers" data-icon="octicon-star" href="https://github.com/chubin/cheat.sh" class="github-button">cheat.sh</a>
+"""
+
+GITHUB_BUTTON_2 = """
+<!-- Place this tag where you want the button to render. -->
+<a aria-label="Star chubin/cheat.sheets on GitHub" data-count-aria-label="# stargazers on GitHub" data-count-api="/repos/chubin/cheat.sheets#stargazers_count" data-count-href="/chubin/cheat.sheets/stargazers" data-icon="octicon-star" href="https://github.com/chubin/cheat.sheets" class="github-button">cheat.sheets</a>
+"""
+
+GITHUB_BUTTON_FOOTER = """
+<!-- Place this tag right after the last button or just before your close body tag. -->
+<script async defer id="github-bjs" src="https://buttons.github.io/buttons.js"></script>
+"""
+
+<EOF>
+<BOF>
+"""
+Main module, answers hub.
+
+Exports:
+
+    get_topics_list()
+    get_topic_type()
+    get_answer()
+"""
+from __future__ import print_function
+
+from gevent.monkey import patch_all
+from gevent.subprocess import Popen, PIPE
+patch_all()
+
+# pylint: disable=wrong-import-position,wrong-import-order
+import sys
+import collections
+import glob
+import os
+import re
+import redis
+from fuzzywuzzy import process, fuzz
+from polyglot.detect import Detector
+from polyglot.detect.base import UnknownLanguage
+import time
+
+import beautifier
+from globals import MYDIR, PATH_TLDR_PAGES, PATH_CHEAT_PAGES, PATH_CHEAT_SHEETS, PATH_LATENZ, \
+                    COLOR_STYLES, REDISHOST
+from adapter_learnxiny import get_learnxiny, get_learnxiny_list, is_valid_learnxy
+from languages_data import LANGUAGE_ALIAS, SO_NAME, rewrite_editor_section_name
+from colorize_internal import colorize_internal
+# pylint: enable=wrong-import-position,wrong-import-order
+
+REDIS = redis.StrictRedis(host=REDISHOST, port=6379, db=0)
+
+MAX_SEARCH_LEN = 20
+
+INTERNAL_TOPICS = [
+    ':cht.sh',
+    ':bash_completion',
+    ':emacs',
+    ':emacs-ivy',
+    ":firstpage",
+    ":firstpage-v1",
+    ":firstpage-v2",
+    ':fish',
+    ':help',
+    ":intro",
+    ":list",
+    ':post',
+    ':styles',
+    ':styles-demo',
+    ':vim',
+    ':zsh',
+    ':share',
+    ]
+
+COLORIZED_INTERNAL_TOPICS = [
+    ':intro',
+]
+
+def _get_filenames(path):
+    return [os.path.split(topic)[1] for topic in glob.glob(path)]
+
+def _update_tldr_topics():
+    return [filename[:-3]
+            for filename in _get_filenames(PATH_TLDR_PAGES) if filename.endswith('.md')]
+
+def _update_cheat_topics():
+    return _get_filenames(PATH_CHEAT_PAGES)
+
+
+
+TLDR_TOPICS = _update_tldr_topics()
+CHEAT_TOPICS = _update_cheat_topics()
+
+def _remove_initial_underscore(filename):
+    if filename.startswith('_'):
+        filename = filename[1:]
+    return filename
+
+def _sanitize_dirname(dirname):
+    dirname = os.path.basename(dirname)
+    dirname = _remove_initial_underscore(dirname)
+    return dirname
+
+def _format_answer(dirname, filename):
+    return "%s/%s" % (_sanitize_dirname(dirname), filename)
+
+def _get_answer_files_from_folder():
+    topics = map(os.path.split, glob.glob(PATH_CHEAT_SHEETS + "*/*"))
+    return [_format_answer(dirname, filename)
+            for dirname, filename in topics if filename not in ['_info.yaml']]
+def _isdir(topic):
+    return os.path.isdir(topic)
+def _get_answers_and_dirs():
+    topics = glob.glob(PATH_CHEAT_SHEETS + "*")
+    answer_dirs = [_remove_initial_underscore(os.path.split(topic)[1]).rstrip('/')+'/'
+                   for topic in topics if _isdir(topic)]
+    answers = [os.path.split(topic)[1] for topic in topics if not _isdir(topic)]
+    return answers, answer_dirs
+
+def _update_cheat_sheets_topics():
+    answers = _get_answer_files_from_folder()
+    cheatsheet_answers, cheatsheet_dirs = _get_answers_and_dirs()
+    return answers+cheatsheet_answers, cheatsheet_dirs
+
+CHEAT_SHEETS_TOPICS, CHEAT_SHEETS_DIRS = _update_cheat_sheets_topics()
+
+CACHED_TOPICS_LIST = [[]]
+
+def get_topics_list(skip_dirs=False, skip_internal=False):
+    """
+    List of topics returned on /:list
+    """
+
+    if CACHED_TOPICS_LIST[0] != []:
+        return CACHED_TOPICS_LIST[0]
+
+    answer = CHEAT_TOPICS + TLDR_TOPICS + CHEAT_SHEETS_TOPICS
+    answer = sorted(set(answer))
+
+    # doing it in this strange way to save the order of the topics
+    for topic in get_learnxiny_list():
+        if topic not in answer:
+            answer.append(topic)
+
+    if not skip_dirs:
+        answer += CHEAT_SHEETS_DIRS
+    if not skip_internal:
+        answer += INTERNAL_TOPICS
+
+    CACHED_TOPICS_LIST[0] = answer
+    return answer
+
+def _get_topics_dirs():
+    return set([x.split('/', 1)[0] for x in get_topics_list() if '/' in x])
+
+
+def _get_stat():
+    stat = collections.Counter([
+        get_topic_type(topic) for topic in get_topics_list()
+    ])
+
+    answer = ""
+    for key, val in stat.items():
+        answer += "%s %s\n" % (key, val)
+    return answer
+#
+#
+#
+
+TOPIC_TYPE_CACHE = {}
+def get_topic_type(topic): # pylint: disable=too-many-locals,too-many-branches,too-many-statements
+    """
+    Return topic type for `topic` or "unknown" if topic can't be determined.
+    """
+    if topic in TOPIC_TYPE_CACHE:
+        return TOPIC_TYPE_CACHE[topic]
+
+    result = 'unknown'
+
+    if topic == "":
+        result = "search"
+    elif topic.startswith(":"):
+        result = "internal"
+    elif '/' in topic:
+        topic_type, topic_name = topic.split('/', 1)
+        if '+' in topic_name:
+            result = 'question'
+        else:
+            if (topic_name in [':list', ':learn']):
+                result = "internal"
+                if topic_name == ':learn' and is_valid_learnxy(topic):
+                    result = 'learnxiny'
+            else:
+		# let us activate the 'question' feature for all subsections
+                result = 'question'
+
+    if topic.lower() in ['latencies', 'late.nz', 'latency']:
+        result = 'late.nz'
+
+    if result == 'unknown' or result == 'question':
+        print(CHEAT_SHEETS_TOPICS)
+        if topic in CHEAT_SHEETS_TOPICS:
+            result = "cheat.sheets"
+        elif topic.rstrip('/') in CHEAT_SHEETS_DIRS and topic.endswith('/'):
+            result = "cheat.sheets dir"
+        elif topic in CHEAT_TOPICS:
+            result = "cheat"
+        elif topic in TLDR_TOPICS:
+            result = "tldr"
+        elif '/' not in topic:
+            result = "unknown"
+
+    TOPIC_TYPE_CACHE[topic] = result
+
+    return result
+
+#
+#   Various cheat sheets getters
+#
+#
+#def registered_answer_getter(func):
+#    REGISTERED_ANSWER_GETTERS.append(funct)
+#    return cls
+def _get_internal(topic):
+    if '/' in topic:
+        topic_type, topic_name = topic.split('/', 1)
+        if topic_name == ":list":
+            topic_list = [x[len(topic_type)+1:]
+                          for x in get_topics_list()
+                          if x.startswith(topic_type + "/")]
+            return "\n".join(topic_list)+"\n"
+
+    answer = ""
+    if topic == ":list":
+        answer = "\n".join(x for x in get_topics_list()) + "\n"
+    elif topic == ':styles':
+        answer = "\n".join(COLOR_STYLES) + "\n"
+    elif topic == ":stat":
+        answer = _get_stat()+"\n"
+    elif topic in INTERNAL_TOPICS:
+        answer = open(os.path.join(MYDIR, "share", topic[1:]+".txt"), "r").read()
+        if topic in COLORIZED_INTERNAL_TOPICS:
+            answer = colorize_internal(answer)
+
+    return answer
+
+def _get_tldr(topic):
+    cmd = ["tldr", topic]
+    proc = Popen(cmd, stdout=PIPE, stderr=PIPE)
+    answer = proc.communicate()[0]
+
+    fixed_answer = []
+    for line in answer.splitlines():
+        line = line[2:]
+        if line.startswith('-'):
+            line = '# '+line[2:]
+        elif not line.startswith(' '):
+            line = "# "+line
+        else:
+            pass
+
+        fixed_answer.append(line)
+
+    answer = "\n".join(fixed_answer) + "\n"
+    return answer.decode('utf-8')
+
+def _get_cheat(topic):
+    cmd = ["cheat", topic]
+    proc = Popen(cmd, stdout=PIPE, stderr=PIPE)
+    answer = proc.communicate()[0].decode('utf-8')
+    return answer
+
+def _get_cheat_sheets(topic):
+    """
+    Get the cheat sheet topic from the own repository (cheat.sheets).
+    It's possible that topic directory starts with omitted underscore
+    """
+    filename = PATH_CHEAT_SHEETS + "%s" % topic
+    if not os.path.exists(filename):
+        filename = PATH_CHEAT_SHEETS + "_%s" % topic
+    if os.path.isdir(filename):
+        return ""
+    else:
+        return open(filename, "r").read().decode('utf-8')
+
+def _get_cheat_sheets_dir(topic):
+    answer = []
+    for f_name in glob.glob(PATH_CHEAT_SHEETS + "%s/*" % topic.rstrip('/')):
+        answer.append(os.path.basename(f_name))
+    topics = sorted(answer)
+    return "\n".join(topics) + "\n"
+
+def _get_answer_for_question(topic):
+    """
+    Find answer for the `topic` question.
+    """
+
+    topic_words = topic.replace('+', ' ').strip()
+    # some clients send queries with - instead of + so we have to rewrite them to
+    topic = re.sub(r"(?<!-)-", ' ', topic)
+
+    topic_words = topic.split()
+
+    topic = " ".join(topic_words)
+
+    lang = 'en'
+    try:
+        query_text = topic # " ".join(topic)
+        query_text = re.sub('^[^/]*/+', '', query_text.rstrip('/'))
+        query_text = re.sub('/[0-9]+$', '', query_text)
+        query_text = re.sub('/[0-9]+$', '', query_text)
+        detector = Detector(query_text)
+        supposed_lang = detector.languages[0].code
+        if len(topic_words) > 2 or supposed_lang in ['az', 'ru', 'uk', 'de', 'fr', 'es', 'it', 'nl']:
+            lang = supposed_lang
+        if supposed_lang.startswith('zh_') or supposed_lang == 'zh':
+            lang = 'zh'
+        elif supposed_lang.startswith('pt_'):
+            lang = 'pt'
+        if supposed_lang in ['ja', 'ko']:
+            lang = supposed_lang
+
+    except UnknownLanguage:
+        print("Unknown language (%s)" % query_text)
+
+    if lang != 'en':
+        topic = ['--human-language', lang, topic]
+    else:
+        topic = [topic]
+
+    cmd = [os.path.join(MYDIR, "bin/get-answer-for-question")] + topic
+    proc = Popen(cmd, stdout=PIPE, stderr=PIPE)
+    answer = proc.communicate()[0].decode('utf-8')
+    return answer
+
+def _get_unknown(topic):
+    topics_list = get_topics_list()
+    if topic.startswith(':'):
+        topics_list = [x for x in topics_list if x.startswith(':')]
+    else:
+        topics_list = [x for x in topics_list if not x.startswith(':')]
+
+    possible_topics = process.extract(topic, topics_list, scorer=fuzz.ratio)[:3]
+    possible_topics_text = "\n".join([("    * %s %s" % x) for x in possible_topics])
+    return """
+Unknown topic.
+Do you mean one of these topics maybe?
+
+%s
+    """ % possible_topics_text
+
+def _get_latenz(topic):
+    sys.path.append(PATH_LATENZ)
+    import latencies
+    return latencies.render()
+
+# pylint: disable=bad-whitespace
+#
+# topic_type, function_getter
+# should be replaced with a decorator
+TOPIC_GETTERS = (
+    ('late.nz',             _get_latenz),
+    ("cheat.sheets",        _get_cheat_sheets),
+    ("cheat.sheets dir",    _get_cheat_sheets_dir),
+    ("tldr",                _get_tldr),
+    ("internal",            _get_internal),
+    ("cheat",               _get_cheat),
+    ("learnxiny",           get_learnxiny),
+    ("question",            _get_answer_for_question),
+    ("unknown",             _get_unknown),
+)
+# pylint: enable=bad-whitespace
+
+def get_answer(topic, keyword, options="", request_options=None): # pylint: disable=too-many-locals,too-many-branches,too-many-statements
+    """
+    Find cheat sheet for the topic.
+    If `keyword` is None or rempty, return the whole answer.
+    Otherwise cut the paragraphs containing keywords.
+
+    Args:
+        topic (str):    the name of the topic of the cheat sheet
+        keyword (str):  the name of the keywords to search in the cheat sheets
+
+    Returns:
+        string:         the cheat sheet
+    """
+
+    def _join_paragraphs(paragraphs):
+        answer = "\n".join(paragraphs)
+        return answer
+
+    def _split_paragraphs(text):
+        answer = []
+        paragraph = ""
+        for line in text.splitlines():
+            if line == "":
+                answer.append(paragraph)
+                paragraph = ""
+            else:
+                paragraph += line+"\n"
+        answer.append(paragraph)
+        return answer
+
+    def _paragraph_contains(paragraph, keyword, insensitive=False, word_boundaries=True):
+        """
+        Check if `paragraph` contains `keyword`.
+        Several keywords can be joined together using ~
+        For example: ~ssh~passphrase
+        """
+        answer = True
+
+        if '~' in keyword:
+            keywords = keyword.split('~')
+        else:
+            keywords = [keyword]
+
+        for kwrd in keywords:
+            regex = re.escape(kwrd)
+            if not word_boundaries:
+                regex = r"\b%s\b" % kwrd
+
+            if insensitive:
+                answer = answer and bool(re.search(regex, paragraph, re.IGNORECASE))
+            else:
+                answer = answer and bool(re.search(regex, paragraph))
+
+        return answer
+
+    def _rewrite_aliases(word):
+        if word == ':bash.completion':
+            return ':bash_completion'
+        return word
+
+    def _rewrite_section_name(query):
+        """
+        """
+        if '/' not in query:
+            return query
+
+        section_name, rest = query.split('/', 1)
+        section_name = LANGUAGE_ALIAS.get(section_name, section_name)
+        return "%s/%s" % (section_name, rest)
+
+    def _rewrite_section_name_for_q(query):
+        """
+        FIXME: we rewrite the section name too earlier,
+        what means that we have to use SO names everywhere,
+        where actually canonified internal names shoud be used.
+        After this thing is fixed, we should:
+        * fix naming in cache
+        * fix VIM_NAMES
+        """
+        if '/' not in query:
+            return query
+
+        section_name, rest = query.split('/', 1)
+        if ':' in section_name:
+            section_name = rewrite_editor_section_name(section_name)
+
+        section_name = SO_NAME.get(section_name, section_name)
+        return "%s/%s" % (section_name, rest)
+
+
+    answer = None
+    needs_beautification = False
+
+    topic = _rewrite_aliases(topic)
+    topic = _rewrite_section_name(topic)
+
+    # this is pretty unoptimal
+    # so this part should be rewritten
+    # for the most queries we could say immediately
+    # what type the query has
+    start_time = time.time()
+    topic_type = get_topic_type(topic)
+
+    # checking if the answer is in the cache
+    if topic != "":
+        # temporary hack for "questions":
+        # the topic name has to be prefixed with q:
+        # so we can later delete them from redis
+        # and we known that they need beautification
+        #if '/' in topic and '+' in topic:
+        if topic_type == 'question': #'/' in topic and '+' in topic:
+            topic = _rewrite_section_name_for_q(topic)
+            topic = "q:" + topic
+            needs_beautification = True
+
+        answer = REDIS.get(topic)
+        if answer:
+            answer = answer.decode('utf-8')
+
+    # if answer was not found in the cache
+    # try to find it in one of the repositories
+    if not answer:
+
+        for topic_getter_type, topic_getter in TOPIC_GETTERS:
+            if topic_type == topic_getter_type:
+                answer = topic_getter(topic)
+                break
+        if not answer:
+            topic_type = "unknown"
+            answer = _get_unknown(topic)
+
+        # saving answers in the cache
+        if topic_type not in ["search", "internal", "unknown"]:
+            REDIS.set(topic, answer)
+
+    if needs_beautification:
+        filetype = 'bash'
+        if '/' in topic:
+            filetype = topic.split('/', 1)[0]
+            if filetype.startswith('q:'):
+                filetype = filetype[2:]
+
+        answer = beautifier.beautify(answer.encode('utf-8'), filetype, request_options)
+
+    if not keyword:
+        return answer
+
+    #
+    # shorten the answer, because keyword is specified
+    #
+    insensitive = 'i' in options
+    word_boundaries = 'b' in options
+
+    paragraphs = _split_paragraphs(answer)
+    paragraphs = [p for p in paragraphs
+                  if _paragraph_contains(p, keyword,
+                                         insensitive=insensitive,
+                                         word_boundaries=word_boundaries)]
+    if paragraphs == []:
+        return ""
+
+    answer = _join_paragraphs(paragraphs)
+    return answer
+
+def find_answer_by_keyword(directory, keyword, options="", request_options=None):
+    """
+    Search in the whole tree of all cheatsheets or in its subtree `directory`
+    by `keyword`
+    """
+
+    recursive = 'r' in options
+
+    answer_paragraphs = []
+    for topic in get_topics_list(skip_internal=True, skip_dirs=True):
+        # skip the internal pages, don't show them in search
+        if topic in INTERNAL_TOPICS:
+            continue
+
+        if not topic.startswith(directory):
+            continue
+
+        subtopic = topic[len(directory):]
+        if not recursive and '/' in subtopic:
+            continue
+
+        answer = get_answer(topic, keyword, options=options, request_options=request_options)
+        if answer:
+            answer_paragraphs.append((topic, answer))
+
+        if len(answer_paragraphs) > MAX_SEARCH_LEN:
+            answer_paragraphs.append(("LIMITED", "LIMITED TO %s ANSWERS" % MAX_SEARCH_LEN))
+            break
+
+    return answer_paragraphs
+<EOF>
+<BOF>
+"""
+
+Programming languages information.
+Will be (probably) moved to a separate file/directory
+from the project tree.
+
+"""
+
+import pygments.lexers
+
+LEXER = {
+    "assembly"  : pygments.lexers.NasmLexer,
+    "awk"       : pygments.lexers.AwkLexer,
+    "bash"      : pygments.lexers.BashLexer,
+    "basic"     : pygments.lexers.QBasicLexer,
+    "bf"        : pygments.lexers.BrainfuckLexer,
+    "chapel"    : pygments.lexers.ChapelLexer,
+    "clojure"   : pygments.lexers.ClojureLexer,
+    "coffee"    : pygments.lexers.CoffeeScriptLexer,
+    "cpp"       : pygments.lexers.CppLexer,
+    "c"         : pygments.lexers.CLexer,
+    "csharp"    : pygments.lexers.CSharpLexer,
+    "d"         : pygments.lexers.DLexer,
+    "dart"      : pygments.lexers.DartLexer,
+    "delphi"    : pygments.lexers.DelphiLexer,
+    "elisp"     : pygments.lexers.EmacsLispLexer,
+    "elixir"    : pygments.lexers.ElixirLexer,
+    "elm"       : pygments.lexers.ElmLexer,
+    "erlang"    : pygments.lexers.ErlangLexer,
+    "factor"    : pygments.lexers.FactorLexer,
+    "forth"     : pygments.lexers.ForthLexer,
+    "fortran"   : pygments.lexers.FortranLexer,
+    "fsharp"    : pygments.lexers.FSharpLexer,
+    "go"        : pygments.lexers.GoLexer,
+    "groovy"    : pygments.lexers.GroovyLexer,
+    "haskell"   : pygments.lexers.HaskellLexer,
+    "java"      : pygments.lexers.JavaLexer,
+    "js"        : pygments.lexers.JavascriptLexer,
+    "julia"     : pygments.lexers.JuliaLexer,
+    "kotlin"    : pygments.lexers.KotlinLexer,
+    "lisp"      : pygments.lexers.CommonLispLexer,
+    "lua"       : pygments.lexers.LuaLexer,
+    "mathematica": pygments.lexers.MathematicaLexer,
+    "matlab"    : pygments.lexers.MatlabLexer,
+    "mongo" :   pygments.lexers.JavascriptLexer,
+    "objective-c": pygments.lexers.ObjectiveCppLexer,
+    "ocaml"     : pygments.lexers.OcamlLexer,
+    "perl"      : pygments.lexers.PerlLexer,
+    "perl6"     : pygments.lexers.Perl6Lexer,
+    "php"       : pygments.lexers.PhpLexer,
+    "psql"  :   pygments.lexers.PostgresLexer,
+    "python"    : pygments.lexers.PythonLexer,
+    "python3"   : pygments.lexers.Python3Lexer,
+    "r"         : pygments.lexers.SLexer,
+    "racket"    : pygments.lexers.RacketLexer,
+    "ruby"      : pygments.lexers.RubyLexer,
+    "rust"      : pygments.lexers.RustLexer,
+    "solidity"  : pygments.lexers.JavascriptLexer,
+    "scala"     : pygments.lexers.ScalaLexer,
+    "scheme":   pygments.lexers.SchemeLexer,
+    "sql"   :   pygments.lexers.SqlLexer,
+    "swift"     : pygments.lexers.SwiftLexer,
+    "tcl"       : pygments.lexers.TclLexer,
+    "tcsh"      : pygments.lexers.TcshLexer,
+    "vb"        : pygments.lexers.VbNetLexer,
+    "vbnet" :   pygments.lexers.VbNetLexer,
+    "vim"       : pygments.lexers.VimLexer,
+
+    # experimental
+    "arduino":  pygments.lexers.ArduinoLexer,
+    "pike"  :   pygments.lexers.PikeLexer,
+    "eiffel" :  pygments.lexers.EiffelLexer,
+    "clean"  :  pygments.lexers.CleanLexer,
+    "dylan" :   pygments.lexers.DylanLexer,
+}
+
+# canonical names are on the right side
+LANGUAGE_ALIAS = {
+    'asm'       :   'assembly',
+    'assembler' :   'assembly',
+    'c++'       :   'cpp',
+    'c#'        :   'csharp',
+    'clisp'     :   'lisp',
+    'coffeescript': 'coffee',
+    'cplusplus' :   'cpp',
+    'dlang'     :   'd',
+    'f#'        :   'fsharp',
+    'golang'    :   'go',
+    'javascript':   'js',
+    'objc'      :   'objective-c',
+    'p6'        :   'perl6',
+    'sh'        :   'bash',
+    'visualbasic':  'vb',
+    'vba'       :   'vb',
+    'wolfram'   :   'mathematica',
+    'mma'       :   'mathematica',
+    'wolfram-mathematica': 'mathematica',
+}
+
+VIM_NAME = {
+    'assembly'  :   'asm',
+    'bash'      :   'sh',
+    'coffeescript': 'coffee',
+    'csharp'    :   'cs',
+    'delphi'    :   'pascal',
+    'dlang'     :   'd',
+    'elisp'     :   'newlisp',
+    'forth'     :   'fs',
+    'perl6'     :   'perl',
+    'python3'   :   'python',
+    'python-3.x':   'python',
+    'tcsh'      :   'sh',
+    'solidity'  :   'js',
+    'mathematica':  'mma',
+    'wolfram-mathematica': 'mma',
+}
+
+SO_NAME = {
+    'coffee'    :   'coffeescript',
+    'js'        :   'javascript',
+    'python3'   :   'python-3.x',
+    'vb'        :   'vba',
+    'mathematica':  'wolfram-mathematica',
+}
+
+
+#
+# conversion of internal programmin language names
+# into canonical cheat.sh names
+#
+
+ATOM_FT_NAME = {
+}
+
+EMACS_FT_NAME = {
+    "asm-mode"             : "asm",
+    "awk-mode"             : "awk",
+    "sh-mode"              : "bash",
+    # basic
+    "brainfuck-mode"       : "bf",
+    # chapel
+    "clojure-mode"         : "clojure",
+    "coffee-mode"          : "coffee",
+    "c++-mode"             : "cpp",
+    "c-mode"               : "c",
+    "csharp-mode"          : "csharp",
+    "d-mode"               : "d",
+    "dart-mode"            : "dart",
+    "dylan-mode"           : "dylan",
+    "delphi-mode"          : "delphi",
+    "emacs-lisp-mode"      : "elisp",
+    # elixir
+    "elm-mode"             : "elm",
+    "erlang-mode"          : "erlang",
+    # factor
+    "forth-mode"           : "forth",
+    "fortran-mode"         : "fortran",
+    "fsharp-mode"          : "fsharp",
+    "go-mode"              : "go",
+    "groovy-mode"          : "groovy",
+    "haskell-mode"         : "haskell",
+    # "hy-mode"
+    "java-mode"            : "java",
+    "js-jsx-mode"          : "js",
+    "js-mode"              : "js",
+    "js2-jsx-mode"         : "js",
+    "js2-mode"             : "js",
+    "julia-mode"           : "julia",
+    "kotlin-mode"          : "kotlin",
+    "lisp-interaction-mode": "lisp",
+    "lisp-mode"            : "lisp",
+    "lua-mode"             : "lua",
+    # mathematica
+    "matlab-mode"          : "matlab",
+    # mongo
+    "objc-mode"            : "objective-c",
+    # ocaml
+    "perl-mode"            : "perl",
+    "perl6-mode"           : "perl6",
+    "php-mode"             : "php",
+    # psql
+    "python-mode"          : "python",
+    # python3
+    # r -- ess looks it, but I don't know the mode name off hand
+    "racket-mode"          : "racket",
+    "ruby-mode"            : "ruby",
+    "rust-mode"            : "rust",
+    "solidity-mode"        : "solidity",
+    "scala-mode"           : "scala",
+    "scheme-mode"          : "scheme",
+    "sql-mode"             : "sql",
+    "swift-mode"           : "swift",
+    "tcl-mode"             : "tcl",
+    # tcsh
+    "visual-basic-mode"    : "vb",
+    # vbnet
+    # vim
+}
+
+SUBLIME_FT_NAME = {
+}
+
+VIM_FT_NAME = {
+    'asm':          'assembler',
+    'javascript':   'js',
+}
+
+VSCODE_FT_NAME = {
+}
+
+def rewrite_editor_section_name(section_name):
+    """
+    section name cen be specified in form "editor:editor-filetype"
+    and it will be rewritten into form "filetype"
+    basing on the editor filetypes names data.
+    If editor name is unknown, it is just cut off:  notepad:js => js
+
+    Known editors:
+        * atom
+        * vim
+        * emacs
+        * sublime
+        * vscode
+
+    >>> rewrite_editor_section_name('js')
+    'js'
+    >>> rewrite_editor_section_name('vscode:js')
+    'js'
+    """
+    if ':' not in section_name:
+        return section_name
+
+    editor_name, section_name = section_name.split(':', 1)
+    editor_name_mapping = {
+        'atom':     ATOM_FT_NAME,
+        'emacs':    EMACS_FT_NAME,
+        'sublime':  SUBLIME_FT_NAME,
+        'vim':      VIM_FT_NAME,
+        'vscode':   VSCODE_FT_NAME,
+    }
+    if editor_name not in editor_name_mapping:
+        return section_name
+    return editor_name_mapping[editor_name].get(section_name, section_name)
+
+def get_lexer_name(section_name):
+    """
+    Rewrite `section_name` for the further lexer search (for syntax highlighting)
+    """
+    if ':' in section_name:
+        section_name = rewrite_editor_section_name(section_name)
+    return LANGUAGE_ALIAS.get(section_name, section_name)
+
+if __name__ == "__main__":
+    import doctest
+    doctest.testmod()
+<EOF>
+<BOF>
+"""
+POST requests processing.
+Currently used only for new cheat sheets submission.
+"""
+
+import string
+import os
+import random
+from globals import PATH_CHEAT_SHEETS_SPOOL
+
+def _save_cheatsheet(topic_name, cheatsheet):
+    """
+    Save posted cheat sheet `cheatsheet` with `topic_name`
+    in the spool directory
+    """
+
+    nonce = ''.join(random.choice(string.ascii_uppercase + string.digits) for _ in range(9))
+    filename = topic_name.replace('/', '.') + "." + nonce
+    filename = os.path.join(PATH_CHEAT_SHEETS_SPOOL, filename)
+
+    open(filename, 'w').write(cheatsheet)
+
+def process_post_request(req, topic):
+    """
+    Process POST request `req`.
+    """
+    for key, val in req.form.items():
+        if key == '':
+            if topic is None:
+                topic_name = "UNNAMED"
+            else:
+                topic_name = topic
+            cheatsheet = val
+        else:
+            if val == '':
+                if topic is None:
+                    topic_name = "UNNAMED"
+                else:
+                    topic_name = topic
+                cheatsheet = key
+            else:
+                topic_name = key
+                cheatsheet = val
+
+        _save_cheatsheet(topic_name, cheatsheet)
+<EOF>
+<BOF>
+"""
+Support for the stateful queries
+"""
+
+import redis
+from globals import REDISHOST
+
+REDIS = redis.StrictRedis(host=REDISHOST, port=6379, db=1)
+
+def save_query(client_id, query):
+    """
+    Save the last query `query` for the client `client_id`
+    """
+    REDIS.set("l:%s" % client_id, query)
+
+def last_query(client_id):
+    """
+    Return the last query for the client `client_id`
+    """
+    return REDIS.get("l:%s" % client_id)
+<EOF>
+<BOF>
+"""
+Connection limitation.
+
+Number of connections from one IP is limited.
+We have nothing against scripting and automated queries.
+Even the opposite, we encourage them. But there are some
+connection limits that even we can't handle.
+Currently the limits are quite restrictive, but they will be relaxed
+in the future.
+
+Usage:
+
+        limits = Limits()
+        not_allowed = limits.check_ip(ip_address)
+        if not_allowed:
+            return "ERROR: %s" % not_allowed
+"""
+
+import time
+from globals import log
+
+_WHITELIST = ['5.9.243.177']
+
+def _time_caps(minutes, hours, days):
+    return {
+        'min':   minutes,
+        'hour':  hours,
+        'day':   days,
+        }
+
+class Limits(object):
+    """
+    Queries limitation (by IP).
+
+    Exports:
+
+        check_ip(ip_address)
+    """
+
+    def __init__(self):
+        self.intervals = ['min', 'hour', 'day']
+
+        self.divisor = _time_caps(60, 3600, 86400)
+        self.limit = _time_caps(30, 600, 1000)
+        self.last_update = _time_caps(0, 0, 0)
+
+        self.counter = {
+            'min':      {},
+            'hour':     {},
+            'day':      {},
+            }
+
+        self._clear_counters_if_needed()
+
+    def _log_visit(self, interval, ip_address):
+        if ip_address not in self.counter[interval]:
+            self.counter[interval][ip_address] = 0
+        self.counter[interval][ip_address] += 1
+
+    def _limit_exceeded(self, interval, ip_address):
+        visits = self.counter[interval][ip_address]
+        limit = self._get_limit(interval)
+        return  visits > limit
+
+    def _get_limit(self, interval):
+        return self.limit[interval]
+
+    def _report_excessive_visits(self, interval, ip_address):
+        log("%s LIMITED [%s for %s]" % (ip_address, self._get_limit(interval), interval))
+
+    def check_ip(self, ip_address):
+        """
+        Check if `ip_address` is allowed, and if not raise an RuntimeError exception.
+        Return True otherwise
+        """
+        if ip_address in _WHITELIST:
+            return None
+        self._clear_counters_if_needed()
+        for interval in self.intervals:
+            self._log_visit(interval, ip_address)
+            if self._limit_exceeded(interval, ip_address):
+                self._report_excessive_visits(interval, ip_address)
+                return ("Not so fast! Number of queries per %s is limited to %s"
+                        % (interval, self._get_limit(interval)))
+        return None
+
+    def reset(self):
+        """
+        Reset all counters for all IPs
+        """
+        for interval in self.intervals:
+            self.counter[interval] = {}
+
+    def _clear_counters_if_needed(self):
+        current_time = int(time.time())
+        for interval in self.intervals:
+            if current_time // self.divisor[interval] != self.last_update[interval]:
+                self.counter[interval] = {}
+                self.last_update[interval] = current_time / self.divisor[interval]
+<EOF>
+<BOF>
+"""
+Colorize internal cheat sheets.
+Will be merged with panela later.
+"""
+
+import re
+
+from colorama import Fore, Back, Style
+import colored
+
+PALETTES = {
+    0: {
+        1: Fore.WHITE,
+        2: Style.DIM,
+    },
+    1: {
+        1: Fore.CYAN,
+        2: Fore.GREEN,
+        3: colored.fg('orange_3'),
+        4: Style.DIM,
+        5: Style.DIM,
+    },
+    2: {
+        1: Fore.RED,
+        2: Style.DIM,
+    },
+}
+
+
+
+def _reverse_palette(code):
+    return {
+        1 : Fore.BLACK + _back_color(code),
+        2 : Style.DIM
+    }
+
+def _back_color(code):
+    if code == 0 or (isinstance(code, str) and code.lower() == "white"):
+        return Back.WHITE
+    if code == 1 or (isinstance(code, str) and code.lower() == "cyan"):
+        return Back.CYAN
+    if code == 2 or (isinstance(code, str) and code.lower() == "red"):
+        return Back.RED
+
+    return Back.WHITE
+
+def colorize_internal(text, palette_number=1):
+    """
+    Colorize `text`, use `palette`
+    """
+
+    palette = PALETTES[palette_number]
+    palette_reverse = _reverse_palette(palette_number)
+    def _process_text(text):
+        text = text.group()[1:-1]
+        factor = 1
+        if text.startswith('-'):
+            text = text[1:]
+            factor = -1
+        stripped = text.lstrip('0123456789')
+        return (text, stripped, factor)
+
+    def _extract_color_number(text, stripped, factor=1):
+        return int(text[:len(text)-len(stripped)])*factor
+
+    def _colorize_curlies_block(text):
+        text, stripped, factor = _process_text(text)
+        color_number = _extract_color_number(text, stripped, factor)
+
+        if stripped.startswith('='):
+            stripped = stripped[1:]
+
+        reverse = (color_number < 0)
+        if reverse:
+            color_number = -color_number
+
+        if reverse:
+            stripped = palette_reverse[color_number] + stripped + Style.RESET_ALL
+        else:
+            stripped = palette[color_number] + stripped + Style.RESET_ALL
+
+        return stripped
+
+    def _colorize_headers(text):
+        if text.group(0).endswith('\n'):
+            newline = '\n'
+        else:
+            newline = ''
+
+        color_number = 3
+        return palette[color_number] + text.group(0).strip() + Style.RESET_ALL + newline
+
+    text = re.sub("{.*?}", _colorize_curlies_block, text)
+    text = re.sub("#(.*?)\n", _colorize_headers, text)
+    return text
+<EOF>
+<BOF>
+"""
+Global configuration of the project.
+All hardcoded pathes and other data should be
+(theoretically) here.
+"""
+from __future__ import print_function
+
+import logging
+import os
+import yaml
+from pygments.styles import get_all_styles
+
+USE_OS_PACKAGES = True  # set to False if you pull cheat sheets repositories from GitHub
+DOCKERIZED = False      # set to True if the service is running in a Docker container
+
+SERVER_ADDRESS = '0.0.0.0'
+SERVER_PORT = 8002
+
+MYDIR = os.path.abspath(os.path.join(__file__, '..', '..'))
+_CONF_FILE = os.path.join(MYDIR, 'etc/config.yaml')
+
+if DOCKERIZED:
+    REDISHOST = 'redis'
+else:
+    REDISHOST = 'localhost'
+
+ANSI2HTML = os.path.join(MYDIR, "share/ansi2html.sh")
+
+LOG_FILE = os.path.join(MYDIR, 'log/main.log')
+FILE_QUERIES_LOG = os.path.join(MYDIR, 'log/queries.log')
+TEMPLATES = os.path.join(MYDIR, 'share/templates')
+STATIC = os.path.join(MYDIR, 'share/static')
+PATH_VIM_ENVIRONMENT = os.path.join(MYDIR, 'share/vim')
+
+if USE_OS_PACKAGES:
+    PATH_TLDR_PAGES = "/home/igor/.tldr/cache/pages/*/*.md"
+    PATH_CHEAT_PAGES = "/usr/local/lib/python2.7/dist-packages/cheat/cheatsheets/*"
+    PATH_CHEAT_SHEETS = "/home/igor/cheat.sheets/sheets/"
+    PATH_CHEAT_SHEETS_SPOOL = "/home/igor/cheat.sheets/spool/"
+    PATH_LEARNXINY = "/home/igor/git/github.com/adambard/learnxinyminutes-docs"
+    PATH_LATENZ = "/home/igor/git/github.com/chubin/late.nz/bin"
+else:
+    PATH_TLDR_PAGES = os.path.join(MYDIR, "cheatsheets/tldr/*/*.md")
+    PATH_CHEAT_PAGES = os.path.join(MYDIR, "cheatsheets/cheat/*")
+    PATH_CHEAT_SHEETS = os.path.join(MYDIR, "cheatsheets/sheets/")
+    PATH_CHEAT_SHEETS_SPOOL = os.path.join(MYDIR, "cheatsheets/spool/")
+    PATH_LEARNXINY = os.path.join(MYDIR, "cheatsheets/learnxinyminutes-docs")
+    PATH_LATENZ = os.path.join(MYDIR, "late.nz/bin")
+
+GITHUB_REPOSITORY = {
+    "late.nz"           :   'chubin/late.nz',
+    "cheat.sheets"      :   'chubin/cheat.sheets',
+    "cheat.sheets dir"  :   'chubin/cheat.sheets',
+    "tldr"              :   'tldr-pages/tldr',
+    "cheat"             :   'chrisallenlane/cheat',
+    "learnxiny"         :   'adambard/learnxinyminutes-docs',
+    "internal"          :   '',
+    "search"            :   '',
+    "unknown"           :   '',
+}
+
+
+#
+# Reading configuration from etc/config.yaml
+# config overrides default settings
+#
+if os.path.exists(_CONF_FILE):
+    _CONFIG = yaml.load(_CONF_FILE)
+    if 'server' in _CONFIG:
+        _SERVER_CONFIG = _CONFIG['server']
+        if 'address' in _SERVER_CONFIG:
+            SERVER_ADDRESS = _SERVER_CONFIG['address']
+        if 'port' in _SERVER_CONFIG:
+            SERVER_ADDRESS = _SERVER_CONFIG['port']
+
+
+COLOR_STYLES = sorted(list(get_all_styles()))
+
+MALFORMED_RESPONSE_HTML_PAGE = open(os.path.join(STATIC, 'malformed-response.html')).read()
+
+def error(text):
+    """
+    Log error `text` and produce a RuntimeError exception
+    """
+    if not text.startswith('Too many queries'):
+        print(text)
+    logging.error("ERROR %s", text)
+    raise RuntimeError(text)
+
+def log(text):
+    """
+    Log error `text` (if it does not start with 'Too many queries')
+    """
+    if not text.startswith('Too many queries'):
+        print(text)
+        logging.info(text)
+<EOF>
+<BOF>
+# vim: encoding=utf-8
+
+import os
+import sys
+import colored
+import itertools
+from globals import MYDIR
+
+"""
+
+After panela will be ready for it, it will be split out in a separate project,
+that will be used for all chubin's console services.
+There are several features that not yet implemented (see ___doc___ in Panela)
+
+TODO:
+    * html output
+    * png output
+
+"""
+
+from wcwidth import wcswidth
+from colors import find_nearest_color, HEX_TO_ANSI, rgb_from_str
+import pyte
+
+# http://stackoverflow.com/questions/19782975/convert-rgb-color-to-the-nearest-color-in-palette-web-safe-color
+
+try:
+    basestring        # Python 2
+except NameError:
+    basestring = str  # Python 3
+
+
+def color_mapping(clr):
+    if clr == 'default':
+        return None
+    return clr
+
+class Point(object):
+    """
+    One point (character) on a terminal
+    """
+    def __init__(self, char=None, foreground=None, background=None):
+        self.foreground = foreground
+        self.background = background
+        self.char = char
+
+class Panela:
+
+    """
+    To implement:
+
+    Blocks manipulation:
+
+        [*] copy
+        [*] crop
+        [*] cut
+        [*] extend
+        [ ] join
+        [ ] move
+        [*] paste
+        [*] strip
+
+    Colors manipulation:
+
+        [*] paint           foreground/background
+        [*] paint_line
+        [ ] paint_svg
+        [ ] fill            background
+        [ ] fill_line
+        [ ] fill_svg
+        [ ] trans
+
+    Drawing:
+
+        [*] put_point
+        [*] put_line
+        [*] put_circle
+        [*] put_rectangle
+
+    Printing and reading:
+        ansi            reads vt100 sequence
+    """
+
+    def __init__(self, x=80, y=25, panela=None, field=None):
+
+        if panela:
+            self.field = [x for x in panela.field]
+            self.size_x = panela.size_x
+            self.size_y = panela.size_y
+            return
+
+        if field:
+            self.field = field
+            self.size_x = len(field[0])
+            self.size_y = len(field)
+            return
+
+        self.field = [[Point() for _ in range(x)] for _ in range(y)]
+        self.size_x = x
+        self.size_y = y
+
+    def in_field(self, col, row):
+        if col < 0:
+            return False
+        if row < 0:
+            return False
+        if col >= self.size_x:
+            return False
+        if row >= self.size_y:
+            return False
+        return True
+
+#
+# Blocks manipulation
+#
+
+    def copy(self, x1, y1, x2, y2):
+
+        if x1 < 0:
+            x1 += self.size_x
+        if x2 < 0:
+            x2 += self.size_x
+        if x1 > x2:
+            x1, x2 = x2, x1
+
+        if y1 < 0:
+            y1 += self.size_y
+        if y2 < 0:
+            y2 += self.size_y
+        if y1 > y2:
+            y1, y2 = y2, y1
+
+        field = [self.field[i] for i in range(y1, y2+1)]
+        field = [line[x1:x2+1] for line in field]
+
+        return Panela(field=field)
+
+    def cut(self, x1, y1, x2, y2):
+        """
+        """
+        if x1 < 0:
+            x1 += self.size_x
+        if x2 < 0:
+            x2 += self.size_x
+        if x1 > x2:
+            x1, x2 = x2, x1
+
+        if y1 < 0:
+            y1 += self.size_y
+        if y2 < 0:
+            y2 += self.size_y
+        if y1 > y2:
+            y1, y2 = y2, y1
+
+        copied = self.copy(x1, y1, x2, y2)
+
+        for y in range(y1, y2+1):
+            for x in range(x1, x2+1):
+                self.field[y][x] = Point()
+
+        return copied
+
+    def extend(self, cols=None, rows=None):
+        """
+        Adds [cols] columns from the right
+        and [rows] rows from the bottom
+        """
+        if cols and cols > 0:
+            self.field = [x + [Point() for _ in range(cols)] for x in self.field]
+            self.size_x += cols
+
+        if rows and rows > 0:
+            self.field = self.field + [[Point() for _ in range(self.size_x)] for _ in range(rows)]
+            self.size_y += rows
+
+    def crop(self, left=None, right=None, top=None, bottom=None):
+        """
+        Crop panela.
+        Remove <left>, <right> columns from left or right,
+        and <top> and <bottom> rows from top and bottom.
+        """
+
+        if left:
+            if left >= self.size_x:
+                left = self.size_x
+            self.field = [x[left:] for x in self.field]
+            self.size_x -= left
+
+        if right:
+            if right >= self.size_x:
+                right = self.size_x
+            self.field = [x[:-right] for x in self.field]
+            self.size_x -= right
+
+        if top:
+            if top >= self.size_y:
+                top = self.size_y
+            self.field = self.field[top:]
+            self.size_y -= top
+
+        if bottom:
+            if bottom >= self.size_y:
+                bottom = self.size_y
+            self.field = self.field[:-bottom]
+            self.size_y -= bottom
+
+    def paste(self, panela, x1, y1, extend=False, transparence=False):
+        """
+        Paste <panela> starting at <x1>, <y1>.
+        If <extend> is True current panela space will be automatically extended
+        If <transparence> is True, then <panela> is overlaid and characters behind them are seen
+        """
+
+        # FIXME:
+        #  negative x1, y1
+        #  x1,y1 > size_x, size_y
+
+        if extend:
+            x_extend = 0
+            y_extend = 0
+            if x1 + panela.size_x > self.size_x:
+                x_extend = x1 + panela.size_x - self.size_x
+            if y1 + panela.size_y > self.size_y:
+                y_extend = y1 + panela.size_y - self.size_y
+            self.extend(cols=x_extend, rows=y_extend)
+
+        for i in range(y1, min(self.size_y, y1+panela.size_y)):
+            for j in range(x1, min(self.size_x, x1+panela.size_x)):
+                if transparence:
+                    if panela.field[i-y1][j-x1].char and panela.field[i-y1][j-x1].char != " ":
+                        if panela.field[i-y1][j-x1].foreground:
+                            self.field[i][j].foreground = panela.field[i-y1][j-x1].foreground
+                        if panela.field[i-y1][j-x1].background:
+                            self.field[i][j].background = panela.field[i-y1][j-x1].background
+                        self.field[i][j].char = panela.field[i-y1][j-x1].char
+                else:
+                    self.field[i][j] = panela.field[i-y1][j-x1]
+
+    def strip(self):
+        """
+        Strip panela: remove empty spaces around panels rectangle
+        """
+
+        def left_spaces(line):
+            answer = 0
+            for elem in line:
+                if not elem.char:
+                    answer += 1
+                else:
+                    break
+            return answer
+
+        def right_spaces(line):
+            return left_spaces(line[::-1])
+
+        def empty_line(line):
+            return left_spaces(line) == len(line)
+
+        left_space = []
+        right_space = []
+        for line in self.field:
+            left_space.append(left_spaces(line))
+            right_space.append(right_spaces(line))
+        left = min(left_space)
+        right = min(right_space)
+
+        top = 0
+        while top < self.size_y and empty_line(self.field[top]):
+            top += 1
+
+        bottom = 0
+        while bottom < self.size_y and empty_line(self.field[-(bottom+1)]):
+            bottom += 1
+
+        self.crop(left=left, right=right, top=top, bottom=bottom)
+
+#
+# Drawing and painting
+#
+
+    def put_point(self, col, row, char=None, color=None, background=None):
+        """
+        Puts character with color and background color on the field.
+        Char can be a Point or a character.
+        """
+
+        if not self.in_field(col, row):
+            return
+        if isinstance(char, Point):
+            self.field[row][col] = char
+        elif char is None:
+            if background:
+                self.field[row][col].background = background
+            if color:
+                self.field[row][col].foreground = color
+        else:
+            self.field[row][col] = Point(char=char, foreground=color, background=background)
+
+    def put_string(self, col, row, s=None, color=None, background=None):
+        """
+        Put string <s> with foreground color <color> and background color <background>
+        ad <col>, <row>
+        """
+        for i, c in enumerate(s):
+            self.put_point(col+i, row, c, color=color, background=background)
+
+    def put_line(self, x1, y1, x2, y2, char=None, color=None, background=None):
+        """
+        Draw line (x1, y1) - (x2, y2) fith foreground color <color>, background color <background>
+        and character <char>, if specified.
+        """
+
+        def get_line(start, end):
+            """Bresenham's Line Algorithm
+            Produces a list of tuples from start and end
+
+            Source: http://www.roguebasin.com/index.php?title=Bresenham%27s_Line_Algorithm#Python
+
+            >>> points1 = get_line((0, 0), (3, 4))
+            >>> points2 = get_line((3, 4), (0, 0))
+            >>> assert(set(points1) == set(points2))
+            >>> print points1
+            [(0, 0), (1, 1), (1, 2), (2, 3), (3, 4)]
+            >>> print points2
+            [(3, 4), (2, 3), (1, 2), (1, 1), (0, 0)]
+            """
+            # Setup initial conditions
+            x1, y1 = start
+            x2, y2 = end
+            dx = x2 - x1
+            dy = y2 - y1
+
+            # Determine how steep the line is
+            is_steep = abs(dy) > abs(dx)
+
+            # Rotate line
+            if is_steep:
+                x1, y1 = y1, x1
+                x2, y2 = y2, x2
+
+            # Swap start and end points if necessary and store swap state
+            swapped = False
+            if x1 > x2:
+                x1, x2 = x2, x1
+                y1, y2 = y2, y1
+                swapped = True
+
+            # Recalculate differentials
+            dx = x2 - x1
+            dy = y2 - y1
+
+            # Calculate error
+            error = int(dx / 2.0)
+            ystep = 1 if y1 < y2 else -1
+
+            # Iterate over bounding box generating points between start and end
+            y = y1
+            points = []
+            for x in range(x1, x2 + 1):
+                coord = (y, x) if is_steep else (x, y)
+                points.append(coord)
+                error -= abs(dy)
+                if error < 0:
+                    y += ystep
+                    error += dx
+
+            # Reverse the list if the coordinates were swapped
+            if swapped:
+                points.reverse()
+            return points
+
+        if color and not isinstance(color, basestring):
+            color_iter = itertools.cycle(color)
+        else:
+            color_iter = itertools.repeat(color)
+
+        if background and not isinstance(background, basestring):
+            background_iter = itertools.cycle(background)
+        else:
+            background_iter = itertools.repeat(background)
+
+        if char:
+            char_iter = itertools.cycle(char)
+        else:
+            char_iter = itertools.repeat(char)
+
+        for x, y in get_line((x1,y1), (x2, y2)):
+            char = next(char_iter)
+            color = next(color_iter)
+            background = next(background_iter)
+
+            self.put_point(x, y, char=char, color=color, background=background)
+
+    def paint(self, x1, y1, x2, y2, c1, c2=None, bg1=None, bg2=None, angle=None, angle_bg=None):
+        """
+        Paint rectangle (x1,y1) (x2,y2) with foreground color c1 and background bg1 if specified.
+        If spefied colors c2/bg2, rectangle is painted with linear gradient (inclined under angle).
+        """
+
+        def calculate_color(i, j):
+            if angle == None:
+                a = 0
+            else:
+                a = angle
+
+            r1, g1, b1 = rgb_from_str(c1)
+            r2, g2, b2 = rgb_from_str(c2)
+            k = 1.0*(j-x1)/(x2-x1)*(1-a)
+            l = 1.0*(i-y1)/(y2-y1)*a
+            r3, g3, b3 = int(r1 + 1.0*(r2-r1)*(k+l)), int(g1 + 1.0*(g2-g1)*(k+l)), int(b1 + 1.0*(b2-b1)*(k+l))
+
+            return "#%02x%02x%02x" % (r3, g3, b3)
+
+        def calculate_bg(i, j):
+            if angle_bg == None:
+                a = 0
+            else:
+                a = angle
+
+            r1, g1, b1 = rgb_from_str(bg1)
+            r2, g2, b2 = rgb_from_str(bg2)
+            k = 1.0*(j-x1)/(x2-x1)*(1-a)
+            l = 1.0*(i-y1)/(y2-y1)*a
+            r3, g3, b3 = int(r1 + 1.0*(r2-r1)*(k+l)), int(g1 + 1.0*(g2-g1)*(k+l)), int(b1 + 1.0*(b2-b1)*(k+l))
+
+            return "#%02x%02x%02x" % (r3, g3, b3)
+
+        if c2 == None:
+            for i in range(y1,y2):
+                for j in range(x1, x2):
+                    self.field[i][j].foreground = c1
+                    if bg1:
+                        if bg2:
+                            self.field[i][j].background = calculate_bg(i, j)
+                        else:
+                            self.field[i][j].background = bg1
+        else:
+            for i in range(y1,y2):
+                for j in range(x1, x2):
+                    self.field[i][j].foreground = calculate_color(i, j)
+                    if bg1:
+                        if bg2:
+                            self.field[i][j].background = calculate_bg(i, j)
+                        else:
+                            self.field[i][j].background = bg1
+
+        return self
+
+    def put_rectangle(self, x1, y1, x2, y2, char=None, frame=None, color=None, background=None):
+        """
+        Draw rectangle (x1,y1), (x2,y2) using <char> character, <color> and <background> color
+        """
+
+        frame_chars = {
+            'ascii':    u'++++-|',
+            'single':   u'┌┐└┘─│',
+            'double':   u'┌┐└┘─│',
+        }
+        if frame in frame_chars:
+            chars = frame_chars[frame]
+        else:
+            chars = char*6
+
+        for x in range(x1, x2):
+            self.put_point(x, y1, char=chars[4], color=color, background=background)
+            self.put_point(x, y2, char=chars[4], color=color, background=background)
+
+        for y in range(y1, y2):
+            self.put_point(x1, y, char=chars[5], color=color, background=background)
+            self.put_point(x2, y, char=chars[5], color=color, background=background)
+
+        self.put_point(x1, y1, char=chars[0], color=color, background=background)
+        self.put_point(x2, y1, char=chars[1], color=color, background=background)
+        self.put_point(x1, y2, char=chars[2], color=color, background=background)
+        self.put_point(x2, y2, char=chars[3], color=color, background=background)
+
+
+    def put_circle(self, x0, y0, radius, char=None, color=None, background=None):
+        """
+        Draw cricle with center in (x, y) and radius r (x1,y1), (x2,y2)
+        using <char> character, <color> and <background> color
+        """
+
+        def k(x):
+            return int(x*1.9)
+
+        f = 1 - radius
+        ddf_x = 1
+        ddf_y = -2 * radius
+        x = 0
+        y = radius
+        self.put_point(x0, y0 + radius, char=char, color=color, background=background)
+        self.put_point(x0, y0 - radius, char=char, color=color, background=background)
+        self.put_point(x0 + k(radius), y0, char=char, color=color, background=background)
+        self.put_point(x0 - k(radius), y0, char=char, color=color, background=background)
+     
+        char = "x"
+        while x < y:
+            if f >= 0: 
+                y -= 1
+                ddf_y += 2
+                f += ddf_y
+            x += 1
+            ddf_x += 2
+            f += ddf_x    
+            self.put_point(x0 + k(x), y0 + y, char=char, color=color, background=background)
+            self.put_point(x0 - k(x), y0 + y, char=char, color=color, background=background)
+            self.put_point(x0 + k(x), y0 - y, char=char, color=color, background=background)
+            self.put_point(x0 - k(x), y0 - y, char=char, color=color, background=background)
+            self.put_point(x0 + k(y), y0 + x, char=char, color=color, background=background)
+            self.put_point(x0 - k(y), y0 + x, char=char, color=color, background=background)
+            self.put_point(x0 + k(y), y0 - x, char=char, color=color, background=background)
+            self.put_point(x0 - k(y), y0 - x, char=char, color=color, background=background)
+
+    def read_ansi(self, seq, x=0, y=0, transparence=True):
+        """
+        Read ANSI sequence and render it to the panela starting from x and y.
+        If transparence is True, replace spaces with ""
+        """
+        screen = pyte.screens.Screen(self.size_x, self.size_y+1)
+
+        stream = pyte.streams.ByteStream()
+        stream.attach(screen)
+
+        stream.feed(seq.replace('\n', '\r\n'))
+
+        for i, line in sorted(screen.buffer.items(), key=lambda x: x[0]):
+            for j, char in sorted(line.items(), key=lambda x: x[0]):
+                if j >= self.size_x:
+                    break
+                self.field[i][j] = Point(char.data, color_mapping(char.fg), color_mapping(char.bg))
+
+    def __str__(self):
+        answer = ""
+        skip_next = False
+        for i, line in enumerate(self.field):
+            for j, c in enumerate(line):
+                fg_ansi = ""
+                bg_ansi = ""
+                stop = ""
+
+                if self.field[i][j].foreground:
+                    fg_ansi = '\033[38;2;%s;%s;%sm' % rgb_from_str(self.field[i][j].foreground)
+                    stop = colored.attr("reset")
+
+                if self.field[i][j].background:
+                    bg_ansi = '\033[48;2;%s;%s;%sm' % rgb_from_str(self.field[i][j].background)
+                    stop = colored.attr("reset")
+
+                char = c.char or " "
+                if not skip_next:
+                    answer += fg_ansi + bg_ansi + char.encode('utf-8') + stop
+                skip_next = wcswidth(char) == 2
+
+            # answer += "...\n"
+            answer += "\n"
+        return answer
+
+########################################################################################################
+
+class Template(object):
+    def __init__(self):
+        self._mode = 'page'
+        self.page = []
+        self.mask = []
+        self.code = []
+        self.panela = None
+
+        self._colors = {
+            'A': '#00cc00',
+            'B': '#00cc00',
+            'C': '#00aacc',
+            'D': '#888888',
+            'E': '#cccc00',
+            'F': '#ff0000',
+            'H': '#22aa22',
+            'I': '#cc0000',
+            'J': '#000000',
+        }
+
+        self._bg_colors = {
+            'G': '#555555',
+            'J': '#555555',
+        }
+
+    def _process_line(self, line):
+        if line == 'mask':
+            self._mode = 'mask'
+        if line == '':
+            self._mode = 'code'
+
+    def read(self, filename):
+        """
+        Read template from `filename`
+        """
+        with open(filename) as f:
+            self._mode = 'page'
+            for line in f.readlines():
+                line = line.rstrip('\n')
+                if line.startswith('==[') and line.endswith(']=='):
+                    self._process_line(line[3:-3].strip())
+                    continue
+
+                if self._mode == 'page':
+                    self.page.append(line)
+                elif self._mode == 'mask':
+                    self.mask.append(line)
+                elif self._mode == 'code':
+                    self.mask.append(line)
+
+    def apply_mask(self):
+
+        lines = self.page
+        x_size = max([len(x) for x in lines])
+        y_size = len(lines)
+
+        self.panela = Panela(x=x_size, y=y_size)
+        self.panela.read_ansi("".join("%s\n" % x for x in self.page))
+
+        for i, line in enumerate(self.mask):
+            for j, char in enumerate(line):
+                if char in self._colors or char in self._bg_colors:
+                    color = self._colors.get(char)
+                    bg_color = self._bg_colors.get(char)
+                    self.panela.put_point(j, i, color=color, background=bg_color)
+
+    def show(self):
+
+        if self.panela:
+            return str(self.panela)
+
+        return self.page
+
+def main():
+    "Only for experiments"
+
+    pagepath = os.path.join(MYDIR, "share/firstpage-v2.pnl")
+    template = Template()
+    template.read(pagepath)
+    template.apply_mask()
+    sys.stdout.write(template.show())
+
+
+if __name__ == '__main__':
+    main()
+<EOF>
+<BOF>
+import os
+import json
+
+COLORS_JSON = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'colors.json')
+COLOR_TABLE = json.loads(open(COLORS_JSON, 'r').read())
+VALID_COLORS = [x['hexString'] for x in COLOR_TABLE]
+HEX_TO_ANSI = {x['hexString']:x['colorId'] for x in COLOR_TABLE}
+
+def rgb_from_str(s):
+    # s starts with a #.  
+    r, g, b = int(s[1:3],16), int(s[3:5], 16),int(s[5:7], 16)  
+    return r, g, b 
+
+def find_nearest_color(hex_color):  
+    R, G, B = rgb_from_str(hex_color)
+    mindiff = None
+    for d in VALID_COLORS:  
+        r, g, b = rgb_from_str(d)  
+        diff = abs(R -r)*256 + abs(G-g)* 256 + abs(B- b)* 256   
+        if mindiff is None or diff < mindiff:  
+            mindiff = diff  
+            mincolorname = d  
+    return mincolorname 
+
+
+<EOF>

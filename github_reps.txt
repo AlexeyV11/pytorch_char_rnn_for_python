@@ -38,7 +38,6 @@ https://github.com/getsentry/sentry
 https://github.com/Valloric/YouCompleteMe
 https://github.com/0xAX/linux-insides
 https://github.com/nvbn/thefuck
-https://github.com/explosion/spaCy
 https://github.com/spotify/luigi
 https://github.com/getredash/redash
 https://github.com/eriklindernoren/ML-From-Scratch

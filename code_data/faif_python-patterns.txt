@@ -1,0 +1,4887 @@
+<BOF>
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+import unittest
+from behavioral.state import Radio
+
+
+class RadioTest(unittest.TestCase):
+    """
+    Attention: Test case results depend on test case execution. The test cases
+    in this integration test class should be executed in an explicit order:
+    http://stackoverflow.com/questions/5387299/python-unittest-testcase-execution-order
+    """
+
+    @classmethod
+    def setUpClass(self):
+        self.radio = Radio()
+
+    def test_initial_state(self):
+        state = self.radio.state.name
+        expected_state_name = 'AM'
+        self.assertEqual(state, expected_state_name)
+
+    def test_initial_am_station(self):
+        station = self.radio.state.stations[self.radio.state.pos]
+        expected_station = '1250'
+        self.assertEqual(station, expected_station)
+
+    def test_2nd_am_station_after_scan(self):
+        self.radio.scan()
+        station = self.radio.state.stations[self.radio.state.pos]
+        expected_station = '1380'
+        self.assertEqual(station, expected_station)
+
+    def test_3rd_am_station_after_scan(self):
+        self.radio.scan()
+        station = self.radio.state.stations[self.radio.state.pos]
+        expected_station = '1510'
+        self.assertEqual(station, expected_station)
+
+    def test_am_station_overflow_after_scan(self):
+        self.radio.scan()
+        station = self.radio.state.stations[self.radio.state.pos]
+        expected_station = '1250'
+        self.assertEqual(station, expected_station)
+
+    def test_shall_toggle_from_am_to_fm(self):
+        self.radio.toggle_amfm()
+        state = self.radio.state.name
+        expected_state_name = 'FM'
+        self.assertEqual(state, expected_state_name)
+
+    def test_shall_toggle_from_fm_to_am(self):
+        self.radio.toggle_amfm()
+        state = self.radio.state.name
+        expected_state_name = 'AM'
+        self.assertEqual(state, expected_state_name)
+<EOF>
+<BOF>
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+import unittest
+from structural.decorator import TextTag, BoldWrapper, ItalicWrapper
+
+
+class TestTextWrapping(unittest.TestCase):
+    def setUp(self):
+        self.raw_string = TextTag('raw but not cruel')
+
+    def test_italic(self):
+        self.assertEqual(ItalicWrapper(self.raw_string).render(), '<i>raw but not cruel</i>')
+
+    def test_bold(self):
+        self.assertEqual(BoldWrapper(self.raw_string).render(), '<b>raw but not cruel</b>')
+
+    def test_mixed_bold_and_italic(self):
+        self.assertEqual(BoldWrapper(ItalicWrapper(self.raw_string)).render(), '<b><i>raw but not cruel</i></b>')
+<EOF>
+<BOF>
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+import unittest
+from other.hsm.hsm import (
+    HierachicalStateMachine,
+    UnsupportedMessageType,
+    UnsupportedState,
+    UnsupportedTransition,
+    Active,
+    Standby,
+    Suspect,
+)
+
+try:
+    from unittest.mock import patch
+except ImportError:
+    from mock import patch
+
+
+class HsmMethodTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.hsm = HierachicalStateMachine()
+
+    def test_initial_state_shall_be_standby(cls):
+        cls.assertEqual(isinstance(cls.hsm._current_state, Standby), True)
+
+    def test_unsupported_state_shall_raise_exception(cls):
+        with cls.assertRaises(UnsupportedState):
+            cls.hsm._next_state('missing')
+
+    def test_unsupported_message_type_shall_raise_exception(cls):
+        with cls.assertRaises(UnsupportedMessageType):
+            cls.hsm.on_message('trigger')
+
+    def test_calling_next_state_shall_change_current_state(cls):
+        cls.hsm._current_state = Standby  # initial state
+        cls.hsm._next_state('active')
+        cls.assertEqual(isinstance(cls.hsm._current_state, Active), True)
+        cls.hsm._current_state = Standby(cls.hsm)  # initial state
+
+    def test_method_perform_switchover_shall_return_specifically(cls):
+        """ Exemplary HierachicalStateMachine method test.
+        (here: _perform_switchover()). Add additional test cases... """
+        return_value = cls.hsm._perform_switchover()
+        expected_return_value = 'perform switchover'
+        cls.assertEqual(return_value, expected_return_value)
+
+
+class StandbyStateTest(unittest.TestCase):
+    """ Exemplary 2nd level state test class (here: Standby state). Add missing
+    state test classes... """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.hsm = HierachicalStateMachine()
+
+    def setUp(cls):
+        cls.hsm._current_state = Standby(cls.hsm)
+
+    def test_given_standby_on_message_switchover_shall_set_active(cls):
+        cls.hsm.on_message('switchover')
+        cls.assertEqual(isinstance(cls.hsm._current_state, Active), True)
+
+    def test_given_standby_on_message_switchover_shall_call_hsm_methods(cls):
+        with patch.object(cls.hsm, '_perform_switchover') as mock_perform_switchover, patch.object(
+            cls.hsm, '_check_mate_status'
+        ) as mock_check_mate_status, patch.object(
+            cls.hsm, '_send_switchover_response'
+        ) as mock_send_switchover_response, patch.object(
+            cls.hsm, '_next_state'
+        ) as mock_next_state:
+            cls.hsm.on_message('switchover')
+            cls.assertEqual(mock_perform_switchover.call_count, 1)
+            cls.assertEqual(mock_check_mate_status.call_count, 1)
+            cls.assertEqual(mock_send_switchover_response.call_count, 1)
+            cls.assertEqual(mock_next_state.call_count, 1)
+
+    def test_given_standby_on_message_fault_trigger_shall_set_suspect(cls):
+        cls.hsm.on_message('fault trigger')
+        cls.assertEqual(isinstance(cls.hsm._current_state, Suspect), True)
+
+    def test_given_standby_on_message_diagnostics_failed_shall_raise_exception_and_keep_in_state(cls):
+        with cls.assertRaises(UnsupportedTransition):
+            cls.hsm.on_message('diagnostics failed')
+        cls.assertEqual(isinstance(cls.hsm._current_state, Standby), True)
+
+    def test_given_standby_on_message_diagnostics_passed_shall_raise_exception_and_keep_in_state(cls):
+        with cls.assertRaises(UnsupportedTransition):
+            cls.hsm.on_message('diagnostics passed')
+        cls.assertEqual(isinstance(cls.hsm._current_state, Standby), True)
+
+    def test_given_standby_on_message_operator_inservice_shall_raise_exception_and_keep_in_state(cls):
+        with cls.assertRaises(UnsupportedTransition):
+            cls.hsm.on_message('operator inservice')
+        cls.assertEqual(isinstance(cls.hsm._current_state, Standby), True)
+<EOF>
+<BOF>
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+import unittest
+import sys
+
+try:
+    from io import StringIO
+except ImportError:
+    from StringIO import StringIO
+from structural.facade import TestRunner, TC1, TC2, TC3
+
+
+class TestRunnerFacilities(unittest.TestCase):
+    def setUp(self):
+        self.tc1 = TC1()
+        self.tc2 = TC2()
+        self.tc3 = TC3()
+        self.average_result_tc1 = (
+            "###### In Test 1 ######\n" + "Setting up\n" + "Running test\n" + "Tearing down\n" + "Test Finished"
+        )
+        self.average_result_tc2 = (
+            "###### In Test 2 ######\n" + "Setting up\n" + "Running test\n" + "Tearing down\n" + "Test Finished"
+        )
+        self.average_result_tc3 = (
+            "###### In Test 3 ######\n" + "Setting up\n" + "Running test\n" + "Tearing down\n" + "Test Finished"
+        )
+        self.runner = TestRunner()
+        self.out = StringIO()
+        self.saved_stdout = sys.stdout
+        sys.stdout = self.out
+
+    def tearDown(self):
+        self.out.close()
+        sys.stdout = self.saved_stdout
+
+    def test_tc1_output(self):
+        self.tc1.run()
+        output = self.out.getvalue().strip()
+        self.assertEqual(output, self.average_result_tc1)
+
+    def test_tc2_output(self):
+        self.tc2.run()
+        output = self.out.getvalue().strip()
+        self.assertEqual(output, self.average_result_tc2)
+
+    def test_tc3_output(self):
+        self.tc3.run()
+        output = self.out.getvalue().strip()
+        self.assertEqual(output, self.average_result_tc3)
+
+    def test_bunch_launch(self):
+        self.runner.runAll()
+        output = self.out.getvalue().strip()
+        self.assertEqual(
+            output, str(self.average_result_tc1 + '\n\n' + self.average_result_tc2 + '\n\n' + self.average_result_tc3)
+        )
+<EOF>
+<BOF>
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+import unittest
+
+from dft.setter_injection import TimeDisplay, MidnightTimeProvider, ProductionCodeTimeProvider, datetime
+
+"""
+Port of the Java example of "Setter Injection" in
+"xUnit Test Patterns - Refactoring Test Code" by Gerard Meszaros
+(ISBN-10: 0131495054, ISBN-13: 978-0131495050) accessible in outdated version on
+http://xunitpatterns.com/Dependency%20Injection.html.
+
+Test code which will almost always fail (if not exactly 12:01) when untestable
+production code (have a look into constructor_injection.py) is used:
+
+    def test_display_current_time_at_midnight(self):
+        class_under_test = TimeDisplay()
+        expected_time = "24:01"
+        result = class_under_test.get_current_time_as_as_html_fragment()
+        self.assertEqual(result, expected_time)
+"""
+
+
+class ParameterInjectionTest(unittest.TestCase):
+    def test_display_current_time_at_midnight(self):
+        """
+        Would almost always fail (despite of right at/after midnight) if
+        untestable production code would have been used.
+        """
+        time_provider_stub = MidnightTimeProvider()
+        class_under_test = TimeDisplay()
+        class_under_test.set_time_provider(time_provider_stub)
+        expected_time = "<span class=\"tinyBoldText\">24:01</span>"
+        self.assertEqual(class_under_test.get_current_time_as_html_fragment(), expected_time)
+
+    def test_display_current_time_at_current_time(self):
+        """
+        Just as justification for working example with the time provider used in
+        production. (Will always pass.)
+        """
+        production_code_time_provider = ProductionCodeTimeProvider()
+        class_under_test = TimeDisplay()
+        class_under_test.set_time_provider(production_code_time_provider)
+        current_time = datetime.datetime.now()
+        expected_time = "<span class=\"tinyBoldText\">{}:{}</span>".format(current_time.hour, current_time.minute)
+        self.assertEqual(class_under_test.get_current_time_as_html_fragment(), expected_time)
+<EOF>
+<BOF>
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+import os
+import shutil
+import unittest
+from behavioral.command import MoveFileCommand
+
+
+class CommandTest(unittest.TestCase):
+    @classmethod
+    def __get_test_directory(self):
+        """
+        Get the temporary directory for the tests.
+        """
+        self.test_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'test_command')
+
+    @classmethod
+    def setUpClass(self):
+        """
+        - Create a temporary directory and file
+        /test_command
+           /foo.txt
+        - get the temporary test directory
+        - and initializes the command stack.
+        """
+        os.mkdir('tests/test_command')
+        open('tests/test_command/foo.txt', 'w').close()
+        self.__get_test_directory()
+        self.command_stack = []
+        self.command_stack.append(
+            MoveFileCommand(os.path.join(self.test_dir, 'foo.txt'), os.path.join(self.test_dir, 'bar.txt'))
+        )
+        self.command_stack.append(
+            MoveFileCommand(os.path.join(self.test_dir, 'bar.txt'), os.path.join(self.test_dir, 'baz.txt'))
+        )
+
+    def test_sequential_execution(self):
+        self.command_stack[0].execute()
+        output_after_first_execution = os.listdir(self.test_dir)
+        self.assertEqual(output_after_first_execution[0], 'bar.txt')
+        self.command_stack[1].execute()
+        output_after_second_execution = os.listdir(self.test_dir)
+        self.assertEqual(output_after_second_execution[0], 'baz.txt')
+
+    def test_sequential_undo(self):
+        self.command_stack = list(reversed(self.command_stack))
+        self.command_stack[0].undo()
+        output_after_first_undo = os.listdir(self.test_dir)
+        self.assertEqual(output_after_first_undo[0], 'bar.txt')
+        self.command_stack[1].undo()
+        output_after_second_undo = os.listdir(self.test_dir)
+        self.assertEqual(output_after_second_undo[0], 'foo.txt')
+
+    @classmethod
+    def tearDownClass(self):
+        """
+        Remove the temporary directory /test_command and its content.
+        """
+        shutil.rmtree('tests/test_command')
+<EOF>
+<BOF>
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+import os
+import subprocess
+import unittest
+
+
+class StrategyTest(unittest.TestCase):
+    def test_print_output(self):
+        """
+        Verifies the print output when strategy.py is executed.
+        The expected_output is equivalent to the output on the command
+        line when running 'python strategy.py'.
+        """
+        output = subprocess.check_output(["python", "behavioral/strategy.py"])
+        expected_output = os.linesep.join(
+            ['Strategy Example 0', 'Strategy Example 1 from execute 1', 'Strategy Example 2 from execute 2', '']
+        )
+        # byte representation required due to EOF returned subprocess
+        expected_output_as_bytes = expected_output.encode(encoding='UTF-8')
+        self.assertEqual(output, expected_output_as_bytes)
+<EOF>
+<BOF>
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+import unittest
+
+try:
+    import queue
+except ImportError:  # python 2.x compatibility
+    import Queue as queue
+from creational.pool import ObjectPool
+
+
+class TestPool(unittest.TestCase):
+    def setUp(self):
+        self.sample_queue = queue.Queue()
+        self.sample_queue.put('first')
+        self.sample_queue.put('second')
+
+    def test_items_recoil(self):
+        with ObjectPool(self.sample_queue, True) as pool:
+            self.assertEqual(pool, 'first')
+        self.assertTrue(self.sample_queue.get() == 'second')
+        self.assertFalse(self.sample_queue.empty())
+        self.assertTrue(self.sample_queue.get() == 'first')
+        self.assertTrue(self.sample_queue.empty())
+
+    def test_frozen_pool(self):
+        with ObjectPool(self.sample_queue) as pool:
+            self.assertEqual(pool, 'first')
+            self.assertEqual(pool, 'first')
+        self.assertTrue(self.sample_queue.get() == 'second')
+        self.assertFalse(self.sample_queue.empty())
+        self.assertTrue(self.sample_queue.get() == 'first')
+        self.assertTrue(self.sample_queue.empty())
+
+
+class TestNaitivePool(unittest.TestCase):
+
+    """def test_object(queue):
+           queue_object = QueueObject(queue, True)
+           print('Inside func: {}'.format(queue_object.object))"""
+
+    def test_pool_behavior_with_single_object_inside(self):
+        sample_queue = queue.Queue()
+        sample_queue.put('yam')
+        with ObjectPool(sample_queue) as obj:
+            # print('Inside with: {}'.format(obj))
+            self.assertEqual(obj, 'yam')
+        self.assertFalse(sample_queue.empty())
+        self.assertTrue(sample_queue.get() == 'yam')
+        self.assertTrue(sample_queue.empty())
+
+    # sample_queue.put('sam')
+    # test_object(sample_queue)
+    # print('Outside func: {}'.format(sample_queue.get()))
+
+    # if not sample_queue.empty():
+<EOF>
+<BOF>
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+import unittest
+from structural.adapter import Dog, Cat, Human, Car, Adapter
+
+
+class ClassTest(unittest.TestCase):
+    def setUp(self):
+        self.dog = Dog()
+        self.cat = Cat()
+        self.human = Human()
+        self.car = Car()
+
+    def test_dog_shall_bark(self):
+        noise = self.dog.bark()
+        expected_noise = "woof!"
+        self.assertEqual(noise, expected_noise)
+
+    def test_cat_shall_meow(self):
+        noise = self.cat.meow()
+        expected_noise = "meow!"
+        self.assertEqual(noise, expected_noise)
+
+    def test_human_shall_speak(self):
+        noise = self.human.speak()
+        expected_noise = "'hello'"
+        self.assertEqual(noise, expected_noise)
+
+    def test_car_shall_make_loud_noise(self):
+        noise = self.car.make_noise(1)
+        expected_noise = "vroom!"
+        self.assertEqual(noise, expected_noise)
+
+    def test_car_shall_make_very_loud_noise(self):
+        noise = self.car.make_noise(10)
+        expected_noise = "vroom!!!!!!!!!!"
+        self.assertEqual(noise, expected_noise)
+
+
+class AdapterTest(unittest.TestCase):
+    def test_dog_adapter_shall_make_noise(self):
+        dog = Dog()
+        dog_adapter = Adapter(dog, make_noise=dog.bark)
+        noise = dog_adapter.make_noise()
+        expected_noise = "woof!"
+        self.assertEqual(noise, expected_noise)
+
+    def test_cat_adapter_shall_make_noise(self):
+        cat = Cat()
+        cat_adapter = Adapter(cat, make_noise=cat.meow)
+        noise = cat_adapter.make_noise()
+        expected_noise = "meow!"
+        self.assertEqual(noise, expected_noise)
+
+    def test_human_adapter_shall_make_noise(self):
+        human = Human()
+        human_adapter = Adapter(human, make_noise=human.speak)
+        noise = human_adapter.make_noise()
+        expected_noise = "'hello'"
+        self.assertEqual(noise, expected_noise)
+
+    def test_car_adapter_shall_make_loud_noise(self):
+        car = Car()
+        car_adapter = Adapter(car, make_noise=car.make_noise)
+        noise = car_adapter.make_noise(1)
+        expected_noise = "vroom!"
+        self.assertEqual(noise, expected_noise)
+
+    def test_car_adapter_shall_make_very_loud_noise(self):
+        car = Car()
+        car_adapter = Adapter(car, make_noise=car.make_noise)
+        noise = car_adapter.make_noise(10)
+        expected_noise = "vroom!!!!!!!!!!"
+
+        self.assertEqual(noise, expected_noise)
+<EOF>
+<BOF>
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+import unittest
+from structural.flyweight import Card
+
+
+class TestCard(unittest.TestCase):
+    def test_instances_shall_reference_same_object(self):
+        c1 = Card('9', 'h')
+        c2 = Card('9', 'h')
+        self.assertEqual(c1, c2)
+        self.assertEqual(id(c1), id(c2))
+
+    def test_instances_with_different_suit(self):
+        """
+        shall reference different objects
+        """
+        c1 = Card('9', 'a')
+        c2 = Card('9', 'b')
+        self.assertNotEqual(id(c1), id(c2))
+
+    def test_instances_with_different_values(self):
+        """
+        shall reference different objects
+        """
+        c1 = Card('9', 'h')
+        c2 = Card('A', 'h')
+        self.assertNotEqual(id(c1), id(c2))
+
+    def test_instances_shall_share_additional_attributes(self):
+        expected_attribute_name = 'attr'
+        expected_attribute_value = 'value of attr'
+        c1 = Card('9', 'h')
+        c1.attr = expected_attribute_value
+        c2 = Card('9', 'h')
+        self.assertEqual(hasattr(c2, expected_attribute_name), True)
+        self.assertEqual(c2.attr, expected_attribute_value)
+<EOF>
+<BOF>
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+import unittest
+from structural.bridge import DrawingAPI1, DrawingAPI2, CircleShape
+
+try:
+    from unittest.mock import patch
+except ImportError:
+    from mock import patch
+
+
+class BridgeTest(unittest.TestCase):
+    def test_bridge_shall_draw_with_concrete_api_implementation(cls):
+        ci1 = DrawingAPI1()
+        ci2 = DrawingAPI2()
+        with patch.object(ci1, 'draw_circle') as mock_ci1_draw_circle, patch.object(
+            ci2, 'draw_circle'
+        ) as mock_ci2_draw_circle:
+            sh1 = CircleShape(1, 2, 3, ci1)
+            sh1.draw()
+            cls.assertEqual(mock_ci1_draw_circle.call_count, 1)
+            sh2 = CircleShape(1, 2, 3, ci2)
+            sh2.draw()
+            cls.assertEqual(mock_ci2_draw_circle.call_count, 1)
+
+    def test_bridge_shall_scale_both_api_circles_with_own_implementation(cls):
+        SCALE_FACTOR = 2
+        CIRCLE1_RADIUS = 3
+        EXPECTED_CIRCLE1_RADIUS = 6
+        CIRCLE2_RADIUS = CIRCLE1_RADIUS * CIRCLE1_RADIUS
+        EXPECTED_CIRCLE2_RADIUS = CIRCLE2_RADIUS * SCALE_FACTOR
+
+        ci1 = DrawingAPI1()
+        ci2 = DrawingAPI2()
+        sh1 = CircleShape(1, 2, CIRCLE1_RADIUS, ci1)
+        sh2 = CircleShape(1, 2, CIRCLE2_RADIUS, ci2)
+        sh1.scale(SCALE_FACTOR)
+        sh2.scale(SCALE_FACTOR)
+        cls.assertEqual(sh1._radius, EXPECTED_CIRCLE1_RADIUS)
+        cls.assertEqual(sh2._radius, EXPECTED_CIRCLE2_RADIUS)
+        with patch.object(sh1, 'scale') as mock_sh1_scale_circle, patch.object(sh2, 'scale') as mock_sh2_scale_circle:
+            sh1.scale(2)
+            sh2.scale(2)
+            cls.assertEqual(mock_sh1_scale_circle.call_count, 1)
+            cls.assertEqual(mock_sh2_scale_circle.call_count, 1)
+<EOF>
+<BOF>
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+import unittest
+
+from dft.constructor_injection import TimeDisplay, MidnightTimeProvider, ProductionCodeTimeProvider, datetime
+
+"""
+Port of the Java example of "Constructor Injection" in
+"xUnit Test Patterns - Refactoring Test Code" by Gerard Meszaros
+(ISBN-10: 0131495054, ISBN-13: 978-0131495050)
+
+Test code which will almost always fail (if not exactly 12:01) when untestable
+production code (production code time provider is datetime) is used:
+
+    def test_display_current_time_at_midnight(self):
+        class_under_test = TimeDisplay()
+        expected_time = "24:01"
+        result = class_under_test.get_current_time_as_as_html_fragment()
+        self.assertEqual(result, expected_time)
+"""
+
+
+class ConstructorInjectionTest(unittest.TestCase):
+    def test_display_current_time_at_midnight(self):
+        """
+        Will almost always fail (despite of right at/after midnight).
+        """
+        time_provider_stub = MidnightTimeProvider()
+        class_under_test = TimeDisplay(time_provider_stub)
+        expected_time = "<span class=\"tinyBoldText\">24:01</span>"
+        self.assertEqual(class_under_test.get_current_time_as_html_fragment(), expected_time)
+
+    def test_display_current_time_at_current_time(self):
+        """
+        Just as justification for working example. (Will always pass.)
+        """
+        production_code_time_provider = ProductionCodeTimeProvider()
+        class_under_test = TimeDisplay(production_code_time_provider)
+        current_time = datetime.datetime.now()
+        expected_time = "<span class=\"tinyBoldText\">{}:{}</span>".format(current_time.hour, current_time.minute)
+        self.assertEqual(class_under_test.get_current_time_as_html_fragment(), expected_time)
+<EOF>
+<BOF>
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+import unittest
+
+from dft.parameter_injection import TimeDisplay, MidnightTimeProvider, ProductionCodeTimeProvider, datetime
+
+"""
+Port of the Java example of "Parameter Injection" in
+"xUnit Test Patterns - Refactoring Test Code" by Gerard Meszaros
+(ISBN-10: 0131495054, ISBN-13: 978-0131495050) accessible in outdated version on
+http://xunitpatterns.com/Dependency%20Injection.html.
+
+Test code which will almost always fail (if not exactly 12:01) when untestable
+production code (have a look into constructor_injection.py) is used:
+
+    def test_display_current_time_at_midnight(self):
+        class_under_test = TimeDisplay()
+        expected_time = "24:01"
+        result = class_under_test.get_current_time_as_as_html_fragment()
+        self.assertEqual(result, expected_time)
+"""
+
+
+class ParameterInjectionTest(unittest.TestCase):
+    def test_display_current_time_at_midnight(self):
+        """
+        Would almost always fail (despite of right at/after midnight) if
+        untestable production code would have been used.
+        """
+        time_provider_stub = MidnightTimeProvider()
+        class_under_test = TimeDisplay()
+        expected_time = "<span class=\"tinyBoldText\">24:01</span>"
+        self.assertEqual(class_under_test.get_current_time_as_html_fragment(time_provider_stub), expected_time)
+
+    def test_display_current_time_at_current_time(self):
+        """
+        Just as justification for working example with the time provider used in
+        production. (Will always pass.)
+        """
+        production_code_time_provider = ProductionCodeTimeProvider()
+        class_under_test = TimeDisplay()
+        current_time = datetime.datetime.now()
+        expected_time = "<span class=\"tinyBoldText\">{}:{}</span>".format(current_time.hour, current_time.minute)
+        self.assertEqual(
+            class_under_test.get_current_time_as_html_fragment(production_code_time_provider), expected_time
+        )
+<EOF>
+<BOF>
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+import unittest
+from creational.builder import construct_building, House, Flat, ComplexHouse
+
+
+class TestSimple(unittest.TestCase):
+    def test_house(self):
+        house = House()
+        self.assertEqual(house.size, 'Big')
+        self.assertEqual(house.floor, 'One')
+
+    def test_flat(self):
+        flat = Flat()
+        self.assertEqual(flat.size, 'Small')
+        self.assertEqual(flat.floor, 'More than One')
+
+
+class TestComplex(unittest.TestCase):
+    def test_house(self):
+        house = construct_building(ComplexHouse)
+        self.assertEqual(house.size, 'Big and fancy')
+        self.assertEqual(house.floor, 'One')
+<EOF>
+<BOF>
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+import unittest
+from behavioral.observer import Subject, Data, DecimalViewer, HexViewer
+
+try:
+    from unittest.mock import patch
+except ImportError:
+    from mock import patch
+
+
+class TestSubject(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.s = Subject()
+        cls.dec_obs = DecimalViewer()
+        cls.hex_obs = HexViewer()
+
+    def test_a_observer_list_shall_be_empty_initially(cls):
+        cls.assertEqual(len(cls.s._observers), 0)
+
+    def test_b_observers_shall_be_attachable(cls):
+        cls.s.attach(cls.dec_obs)
+        cls.assertEqual(isinstance(cls.s._observers[0], DecimalViewer), True)
+        cls.assertEqual(len(cls.s._observers), 1)
+        cls.s.attach(cls.hex_obs)
+        cls.assertEqual(isinstance(cls.s._observers[1], HexViewer), True)
+        cls.assertEqual(len(cls.s._observers), 2)
+
+    def test_c_observers_shall_be_detachable(cls):
+        cls.s.detach(cls.dec_obs)
+        # hex viewer shall be remaining if dec viewer is detached first
+        cls.assertEqual(isinstance(cls.s._observers[0], HexViewer), True)
+        cls.assertEqual(len(cls.s._observers), 1)
+        cls.s.detach(cls.hex_obs)
+        cls.assertEqual(len(cls.s._observers), 0)
+
+
+class TestData(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.dec_obs = DecimalViewer()
+        cls.hex_obs = HexViewer()
+        cls.sub = Data('Data')
+        # inherited behavior already tested with TestSubject
+        cls.sub.attach(cls.dec_obs)
+        cls.sub.attach(cls.hex_obs)
+
+    def test_data_change_shall_notify_all_observers_once(cls):
+        with patch.object(cls.dec_obs, 'update') as mock_dec_obs_update, patch.object(
+            cls.hex_obs, 'update'
+        ) as mock_hex_obs_update:
+            cls.sub.data = 10
+            cls.assertEqual(mock_dec_obs_update.call_count, 1)
+            cls.assertEqual(mock_hex_obs_update.call_count, 1)
+
+    def test_data_value_shall_be_changeable(cls):
+        cls.sub.data = 20
+        cls.assertEqual(cls.sub._data, 20)
+
+    def test_data_name_shall_be_changeable(cls):
+        cls.sub.name = 'New Data Name'
+        cls.assertEqual(cls.sub.name, 'New Data Name')
+<EOF>
+<BOF>
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+import unittest
+from behavioral.publish_subscribe import Provider, Publisher, Subscriber
+
+try:
+    from unittest.mock import patch, call
+except ImportError:
+    from mock import patch, call
+
+
+class TestProvider(unittest.TestCase):
+    """
+    Integration tests ~ provider class with as little mocking as possible.
+    """
+
+    def test_subscriber_shall_be_attachable_to_subscriptions(cls):
+        subscription = 'sub msg'
+        pro = Provider()
+        cls.assertEqual(len(pro.subscribers), 0)
+        sub = Subscriber('sub name', pro)
+        sub.subscribe(subscription)
+        cls.assertEqual(len(pro.subscribers[subscription]), 1)
+
+    def test_subscriber_shall_be_detachable_from_subscriptions(cls):
+        subscription = 'sub msg'
+        pro = Provider()
+        sub = Subscriber('sub name', pro)
+        sub.subscribe(subscription)
+        cls.assertEqual(len(pro.subscribers[subscription]), 1)
+        sub.unsubscribe(subscription)
+        cls.assertEqual(len(pro.subscribers[subscription]), 0)
+
+    def test_publisher_shall_append_subscription_message_to_queue(cls):
+        """ msg_queue ~ Provider.notify(msg) ~ Publisher.publish(msg) """
+        expected_msg = 'expected msg'
+        pro = Provider()
+        pub = Publisher(pro)
+        Subscriber('sub name', pro)
+        cls.assertEqual(len(pro.msg_queue), 0)
+        pub.publish(expected_msg)
+        cls.assertEqual(len(pro.msg_queue), 1)
+        cls.assertEqual(pro.msg_queue[0], expected_msg)
+
+    def test_provider_shall_update_affected_subscribers_with_published_subscription(cls):
+        pro = Provider()
+        pub = Publisher(pro)
+        sub1 = Subscriber('sub 1 name', pro)
+        sub1.subscribe('sub 1 msg 1')
+        sub1.subscribe('sub 1 msg 2')
+        sub2 = Subscriber('sub 2 name', pro)
+        sub2.subscribe('sub 2 msg 1')
+        sub2.subscribe('sub 2 msg 2')
+        with patch.object(sub1, 'run') as mock_subscriber1_run, patch.object(sub2, 'run') as mock_subscriber2_run:
+            pro.update()
+            cls.assertEqual(mock_subscriber1_run.call_count, 0)
+            cls.assertEqual(mock_subscriber2_run.call_count, 0)
+        pub.publish('sub 1 msg 1')
+        pub.publish('sub 1 msg 2')
+        pub.publish('sub 2 msg 1')
+        pub.publish('sub 2 msg 2')
+        with patch.object(sub1, 'run') as mock_subscriber1_run, patch.object(sub2, 'run') as mock_subscriber2_run:
+            pro.update()
+            expected_sub1_calls = [call('sub 1 msg 1'), call('sub 1 msg 2')]
+            mock_subscriber1_run.assert_has_calls(expected_sub1_calls)
+            expected_sub2_calls = [call('sub 2 msg 1'), call('sub 2 msg 2')]
+            mock_subscriber2_run.assert_has_calls(expected_sub2_calls)
+<EOF>
+<BOF>
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+from __future__ import print_function
+import unittest
+from creational.lazy_evaluation import Person
+
+
+class TestDynamicExpanding(unittest.TestCase):
+    def setUp(self):
+        self.John = Person('John', 'Coder')
+
+    def test_innate_properties(self):
+        self.assertDictEqual({'name': 'John', 'occupation': 'Coder', 'call_count2': 0}, self.John.__dict__)
+
+    def test_relatives_not_in_properties(self):
+        self.assertNotIn('relatives', self.John.__dict__)
+
+    def test_extended_properties(self):
+        print(u"John's relatives: {0}".format(self.John.relatives))
+        self.assertDictEqual(
+            {'name': 'John', 'occupation': 'Coder', 'relatives': 'Many relatives.', 'call_count2': 0},
+            self.John.__dict__,
+        )
+
+    def test_relatives_after_access(self):
+        print(u"John's relatives: {0}".format(self.John.relatives))
+        self.assertIn('relatives', self.John.__dict__)
+
+    def test_parents(self):
+        for _ in range(2):
+            self.assertEqual(self.John.parents, "Father and mother")
+        self.assertEqual(self.John.call_count2, 1)
+<EOF>
+<BOF>
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+import unittest
+from creational.prototype import Prototype, PrototypeDispatcher
+
+
+class TestPrototypeFeatures(unittest.TestCase):
+    def setUp(self):
+        self.prototype = Prototype()
+
+    def test_cloning_propperty_innate_values(self):
+        sample_object_1 = self.prototype.clone()
+        sample_object_2 = self.prototype.clone()
+        self.assertEqual(sample_object_1.value, sample_object_2.value)
+
+    def test_extended_property_values_cloning(self):
+        sample_object_1 = self.prototype.clone()
+        sample_object_1.some_value = 'test string'
+        sample_object_2 = self.prototype.clone()
+        self.assertRaises(AttributeError, lambda: sample_object_2.some_value)
+
+    def test_cloning_propperty_assigned_values(self):
+        sample_object_1 = self.prototype.clone()
+        sample_object_2 = self.prototype.clone(value='re-assigned')
+        self.assertNotEqual(sample_object_1.value, sample_object_2.value)
+
+
+class TestDispatcherFeatures(unittest.TestCase):
+    def setUp(self):
+        self.dispatcher = PrototypeDispatcher()
+        self.prototype = Prototype()
+        c = self.prototype.clone()
+        a = self.prototype.clone(value='a-value', ext_value='E')
+        b = self.prototype.clone(value='b-value', diff=True)
+        self.dispatcher.register_object('A', a)
+        self.dispatcher.register_object('B', b)
+        self.dispatcher.register_object('C', c)
+
+    def test_batch_retrieving(self):
+        self.assertEqual(len(self.dispatcher.get_objects()), 3)
+
+    def test_particular_properties_retrieving(self):
+        self.assertEqual(self.dispatcher.get_objects()['A'].value, 'a-value')
+        self.assertEqual(self.dispatcher.get_objects()['B'].value, 'b-value')
+        self.assertEqual(self.dispatcher.get_objects()['C'].value, 'default')
+
+    def test_extended_properties_retrieving(self):
+        self.assertEqual(self.dispatcher.get_objects()['A'].ext_value, 'E')
+        self.assertTrue(self.dispatcher.get_objects()['B'].diff)
+<EOF>
+<BOF>
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+import unittest
+from creational.borg import Borg, YourBorg
+
+
+class BorgTest(unittest.TestCase):
+    def setUp(self):
+        self.b1 = Borg()
+        self.b2 = Borg()
+        self.ib1 = YourBorg()
+
+    def test_initial_borg_state_shall_be_init(self):
+        b = Borg()
+        self.assertEqual(b.state, 'Init')
+
+    def test_changing_instance_attribute_shall_change_borg_state(self):
+        self.b1.state = 'Running'
+        self.assertEqual(self.b1.state, 'Running')
+        self.assertEqual(self.b2.state, 'Running')
+        self.assertEqual(self.ib1.state, 'Running')
+
+    def test_instances_shall_have_own_ids(self):
+        self.assertNotEqual(id(self.b1), id(self.b2), id(self.ib1))
+<EOF>
+<BOF>
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+import unittest
+from creational.factory_method import get_localizer
+
+
+class TestLocalizer(unittest.TestCase):
+    def setUp(self):
+        self.e, self.g = get_localizer(language="English"), get_localizer(language="Greek")
+
+    def test_parrot_eng_localization(self):
+        self.assertEqual(self.e.get('parrot'), 'parrot')
+
+    def test_parrot_greek_localization(self):
+        self.assertEqual(self.g.get('parrot'), 'parrot')
+
+    def test_dog_eng_localization(self):
+        self.assertEqual(self.e.get('dog'), 'dog')
+
+    def test_dog_greek_localization(self):
+        self.assertEqual(self.g.get('dog'), 'σκύλος')
+
+    def test_cat_eng_localization(self):
+        self.assertEqual(self.e.get('cat'), 'cat')
+
+    def test_cat_greek_localization(self):
+        self.assertEqual(self.g.get('cat'), 'γάτα')
+
+    def test_bear_eng_localization(self):
+        self.assertEqual(self.e.get('bear'), 'bear')
+
+    def test_bear_greek_localization(self):
+        self.assertEqual(self.g.get('bear'), 'bear')
+<EOF>
+<BOF>
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+import unittest
+from creational.abstract_factory import PetShop, Dog
+
+try:
+    from unittest.mock import patch
+except ImportError:
+    from mock import patch
+
+
+class TestPetShop(unittest.TestCase):
+    def test_dog_pet_shop_shall_show_dog_instance(self):
+        dog_pet_shop = PetShop(Dog)
+        with patch.object(Dog, 'speak') as mock_Dog_speak:
+            dog_pet_shop.show_pet()
+            self.assertEqual(mock_Dog_speak.call_count, 1)
+<EOF>
+<BOF>
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+import sys
+from time import time
+import unittest
+from structural.proxy import Proxy, NoTalkProxy
+
+if sys.version_info[0] == 2:
+    from StringIO import StringIO
+else:
+    from io import StringIO
+
+
+class ProxyTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        """ Class scope setup. """
+        cls.p = Proxy()
+
+    def setUp(cls):
+        """ Function/test case scope setup. """
+        cls.output = StringIO()
+        cls.saved_stdout = sys.stdout
+        sys.stdout = cls.output
+
+    def tearDown(cls):
+        """ Function/test case scope teardown. """
+        cls.output.close()
+        sys.stdout = cls.saved_stdout
+
+    def test_sales_manager_shall_talk_through_proxy_with_delay(cls):
+        cls.p.busy = 'No'
+        start_time = time()
+        cls.p.talk()
+        end_time = time()
+        execution_time = end_time - start_time
+        print_output = cls.output.getvalue()
+        expected_print_output = 'Proxy checking for Sales Manager availability\n\
+Sales Manager ready to talk\n'
+        cls.assertEqual(print_output, expected_print_output)
+        expected_execution_time = 1
+        cls.assertEqual(int(execution_time * 10), expected_execution_time)
+
+    def test_sales_manager_shall_respond_through_proxy_with_delay(cls):
+        cls.p.busy = 'Yes'
+        start_time = time()
+        cls.p.talk()
+        end_time = time()
+        execution_time = end_time - start_time
+        print_output = cls.output.getvalue()
+        expected_print_output = 'Proxy checking for Sales Manager availability\n\
+Sales Manager is busy\n'
+        cls.assertEqual(print_output, expected_print_output)
+        expected_execution_time = 1
+        cls.assertEqual(int(execution_time * 10), expected_execution_time)
+
+
+class NoTalkProxyTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        """ Class scope setup. """
+        cls.ntp = NoTalkProxy()
+
+    def setUp(cls):
+        """ Function/test case scope setup. """
+        cls.output = StringIO()
+        cls.saved_stdout = sys.stdout
+        sys.stdout = cls.output
+
+    def tearDown(cls):
+        """ Function/test case scope teardown. """
+        cls.output.close()
+        sys.stdout = cls.saved_stdout
+
+    def test_sales_manager_shall_not_talk_through_proxy_with_delay(cls):
+        cls.ntp.busy = 'No'
+        start_time = time()
+        cls.ntp.talk()
+        end_time = time()
+        execution_time = end_time - start_time
+        print_output = cls.output.getvalue()
+        expected_print_output = 'Proxy checking for Sales Manager availability\n\
+This Sales Manager will not talk to you whether he/she is busy or not\n'
+        cls.assertEqual(print_output, expected_print_output)
+        expected_execution_time = 1
+        cls.assertEqual(int(execution_time * 10), expected_execution_time)
+
+    def test_sales_manager_shall_not_respond_through_proxy_with_delay(cls):
+        cls.ntp.busy = 'Yes'
+        start_time = time()
+        cls.ntp.talk()
+        end_time = time()
+        execution_time = end_time - start_time
+        print_output = cls.output.getvalue()
+        expected_print_output = 'Proxy checking for Sales Manager availability\n\
+This Sales Manager will not talk to you whether he/she is busy or not\n'
+        cls.assertEqual(print_output, expected_print_output)
+        expected_execution_time = 1
+        cls.assertEqual(int(execution_time * 10), expected_execution_time)
+<EOF>
+<BOF>
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+"""
+Reference: https://en.wikipedia.org/wiki/Delegation_pattern
+Author: https://github.com/IuryAlves
+
+*TL;DR80
+Allows object composition to achieve the same code reuse as inheritance.
+"""
+
+
+class Delegator(object):
+    """
+    >>> delegator = Delegator(Delegate())
+    >>> delegator.p1
+    123
+    >>> delegator.p2
+    Traceback (most recent call last):
+    ...
+    AttributeError: 'Delegate' object has no attribute 'p2'
+    >>> delegator.do_something("nothing")
+    'Doing nothing'
+    >>> delegator.do_anything()
+    Traceback (most recent call last):
+    ...
+    AttributeError: 'Delegate' object has no attribute 'do_anything'
+    """
+
+    def __init__(self, delegate):
+        self.delegate = delegate
+
+    def __getattr__(self, name):
+        attr = getattr(self.delegate, name)
+        
+        if not callable(attr):
+            return attr
+
+        def wrapper(*args, **kwargs):
+            return attr(*args, **kwargs)
+        return wrapper
+
+
+class Delegate(object):
+    def __init__(self):
+        self.p1 = 123
+
+    def do_something(self, something):
+        return "Doing %s" % something
+
+
+if __name__ == '__main__':
+    import doctest
+
+    doctest.testmod()
+<EOF>
+<BOF>
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+"""
+http://web.archive.org/web/20120309135549/http://dpip.testingperspective.com/?p=28
+
+*TL;DR80
+Encapsulates how a set of objects interact.
+"""
+
+import random
+import time
+
+
+class TC:
+    def __init__(self):
+        self._tm = None
+        self._bProblem = 0
+
+    def setup(self):
+        print("Setting up the Test")
+        time.sleep(0.1)
+        self._tm.prepareReporting()
+
+    def execute(self):
+        if not self._bProblem:
+            print("Executing the test")
+            time.sleep(0.1)
+        else:
+            print("Problem in setup. Test not executed.")
+
+    def tearDown(self):
+        if not self._bProblem:
+            print("Tearing down")
+            time.sleep(0.1)
+            self._tm.publishReport()
+        else:
+            print("Test not executed. No tear down required.")
+
+    def setTM(self, tm):
+        self._tm = tm
+
+    def setProblem(self, value):
+        self._bProblem = value
+
+
+class Reporter:
+    def __init__(self):
+        self._tm = None
+
+    def prepare(self):
+        print("Reporter Class is preparing to report the results")
+        time.sleep(0.1)
+
+    def report(self):
+        print("Reporting the results of Test")
+        time.sleep(0.1)
+
+    def setTM(self, tm):
+        self._tm = tm
+
+
+class DB:
+    def __init__(self):
+        self._tm = None
+
+    def insert(self):
+        print("Inserting the execution begin status in the Database")
+        time.sleep(0.1)
+        # Following code is to simulate a communication from DB to TC
+        if random.randrange(1, 4) == 3:
+            return -1
+
+    def update(self):
+        print("Updating the test results in Database")
+        time.sleep(0.1)
+
+    def setTM(self, tm):
+        self._tm = tm
+
+
+class TestManager:
+    def __init__(self):
+        self._reporter = None
+        self._db = None
+        self._tc = None
+
+    def prepareReporting(self):
+        rvalue = self._db.insert()
+        if rvalue == -1:
+            self._tc.setProblem(1)
+            self._reporter.prepare()
+
+    def setReporter(self, reporter):
+        self._reporter = reporter
+
+    def setDB(self, db):
+        self._db = db
+
+    def publishReport(self):
+        self._db.update()
+        self._reporter.report()
+
+    def setTC(self, tc):
+        self._tc = tc
+
+
+if __name__ == '__main__':
+    reporter = Reporter()
+    db = DB()
+    tm = TestManager()
+    tm.setReporter(reporter)
+    tm.setDB(db)
+    reporter.setTM(tm)
+    db.setTM(tm)
+    # For simplification we are looping on the same test.
+    # Practically, it could be about various unique test classes and their
+    # objects
+    for i in range(3):
+        tc = TC()
+        tc.setTM(tm)
+        tm.setTC(tc)
+        tc.setup()
+        tc.execute()
+        tc.tearDown()
+
+### OUTPUT ###
+# Setting up the Test
+# Inserting the execution begin status in the Database
+# Executing the test
+# Tearing down
+# Updating the test results in Database
+# Reporting the results of Test
+# Setting up the Test
+# Inserting the execution begin status in the Database
+# Reporter Class is preparing to report the results
+# Problem in setup. Test not executed.
+# Test not executed. No tear down required.
+# Setting up the Test
+# Inserting the execution begin status in the Database
+# Executing the test
+# Tearing down
+# Updating the test results in Database
+# Reporting the results of Test
+<EOF>
+<BOF>
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+"""
+*TL;DR80
+Encapsulates all information needed to perform an action or trigger an event.
+"""
+
+from __future__ import print_function
+import os
+from os.path import lexists
+
+
+class MoveFileCommand(object):
+    def __init__(self, src, dest):
+        self.src = src
+        self.dest = dest
+
+    def execute(self):
+        self.rename(self.src, self.dest)
+
+    def undo(self):
+        self.rename(self.dest, self.src)
+
+    def rename(self, src, dest):
+        print(u"renaming %s to %s" % (src, dest))
+        os.rename(src, dest)
+
+
+def main():
+    command_stack = []
+
+    # commands are just pushed into the command stack
+    command_stack.append(MoveFileCommand('foo.txt', 'bar.txt'))
+    command_stack.append(MoveFileCommand('bar.txt', 'baz.txt'))
+
+    # verify that none of the target files exist
+    assert not lexists("foo.txt")
+    assert not lexists("bar.txt")
+    assert not lexists("baz.txt")
+    try:
+        with open("foo.txt", "w"):  # Creating the file
+            pass
+
+        # they can be executed later on
+        for cmd in command_stack:
+            cmd.execute()
+
+        # and can also be undone at will
+        for cmd in reversed(command_stack):
+            cmd.undo()
+    finally:
+        os.unlink("foo.txt")
+
+
+if __name__ == "__main__":
+    main()
+
+### OUTPUT ###
+# renaming foo.txt to bar.txt
+# renaming bar.txt to baz.txt
+# renaming baz.txt to bar.txt
+# renaming bar.txt to foo.txt
+<EOF>
+<BOF>
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+"""
+Reference:
+http://www.slideshare.net/ishraqabd/publish-subscribe-model-overview-13368808
+Author: https://github.com/HanWenfang
+"""
+
+
+class Provider:
+    def __init__(self):
+        self.msg_queue = []
+        self.subscribers = {}
+
+    def notify(self, msg):
+        self.msg_queue.append(msg)
+
+    def subscribe(self, msg, subscriber):
+        self.subscribers.setdefault(msg, []).append(subscriber)
+
+    def unsubscribe(self, msg, subscriber):
+        self.subscribers[msg].remove(subscriber)
+
+    def update(self):
+        for msg in self.msg_queue:
+            for sub in self.subscribers.get(msg, []):
+                sub.run(msg)
+        self.msg_queue = []
+
+
+class Publisher:
+    def __init__(self, msg_center):
+        self.provider = msg_center
+
+    def publish(self, msg):
+        self.provider.notify(msg)
+
+
+class Subscriber:
+    def __init__(self, name, msg_center):
+        self.name = name
+        self.provider = msg_center
+
+    def subscribe(self, msg):
+        self.provider.subscribe(msg, self)
+
+    def unsubscribe(self, msg):
+        self.provider.unsubscribe(msg, self)
+
+    def run(self, msg):
+        print("{} got {}".format(self.name, msg))
+
+
+def main():
+    message_center = Provider()
+
+    fftv = Publisher(message_center)
+
+    jim = Subscriber("jim", message_center)
+    jim.subscribe("cartoon")
+    jack = Subscriber("jack", message_center)
+    jack.subscribe("music")
+    gee = Subscriber("gee", message_center)
+    gee.subscribe("movie")
+    vani = Subscriber("vani", message_center)
+    vani.subscribe("movie")
+    vani.unsubscribe("movie")
+
+    fftv.publish("cartoon")
+    fftv.publish("music")
+    fftv.publish("ads")
+    fftv.publish("movie")
+    fftv.publish("cartoon")
+    fftv.publish("cartoon")
+    fftv.publish("movie")
+    fftv.publish("blank")
+
+    message_center.update()
+
+
+if __name__ == "__main__":
+    main()
+
+### OUTPUT ###
+# jim got cartoon
+# jack got music
+# gee got movie
+# jim got cartoon
+# jim got cartoon
+# gee got movie
+<EOF>
+<BOF>
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+"""
+http://ginstrom.com/scribbles/2007/10/08/design-patterns-python-style/
+
+An example of the Template pattern in Python
+
+*TL;DR80
+Defines the skeleton of an algorithm, deferring steps to subclasses.
+"""
+
+ingredients = "spam eggs apple"
+line = '-' * 10
+
+
+# Skeletons
+def iter_elements(getter, action):
+    """Template skeleton that iterates items"""
+    for element in getter():
+        action(element)
+        print(line)
+
+
+def rev_elements(getter, action):
+    """Template skeleton that iterates items in reverse order"""
+    for element in getter()[::-1]:
+        action(element)
+        print(line)
+
+
+# Getters
+def get_list():
+    return ingredients.split()
+
+
+def get_lists():
+    return [list(x) for x in ingredients.split()]
+
+
+# Actions
+def print_item(item):
+    print(item)
+
+
+def reverse_item(item):
+    print(item[::-1])
+
+
+# Makes templates
+def make_template(skeleton, getter, action):
+    """Instantiate a template method with getter and action"""
+
+    def template():
+        skeleton(getter, action)
+
+    return template
+
+
+# Create our template functions
+templates = [
+    make_template(s, g, a)
+    for g in (get_list, get_lists)
+    for a in (print_item, reverse_item)
+    for s in (iter_elements, rev_elements)
+]
+
+# Execute them
+for template in templates:
+    template()
+
+### OUTPUT ###
+# spam
+# ----------
+# eggs
+# ----------
+# apple
+# ----------
+# apple
+# ----------
+# eggs
+# ----------
+# spam
+# ----------
+# maps
+# ----------
+# sgge
+# ----------
+# elppa
+# ----------
+# elppa
+# ----------
+# sgge
+# ----------
+# maps
+# ----------
+# ['s', 'p', 'a', 'm']
+# ----------
+# ['e', 'g', 'g', 's']
+# ----------
+# ['a', 'p', 'p', 'l', 'e']
+# ----------
+# ['a', 'p', 'p', 'l', 'e']
+# ----------
+# ['e', 'g', 'g', 's']
+# ----------
+# ['s', 'p', 'a', 'm']
+# ----------
+# ['m', 'a', 'p', 's']
+# ----------
+# ['s', 'g', 'g', 'e']
+# ----------
+# ['e', 'l', 'p', 'p', 'a']
+# ----------
+# ['e', 'l', 'p', 'p', 'a']
+# ----------
+# ['s', 'g', 'g', 'e']
+# ----------
+# ['m', 'a', 'p', 's']
+# ----------
+<EOF>
+<BOF>
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+
+class RegistryHolder(type):
+
+    REGISTRY = {}
+
+    def __new__(cls, name, bases, attrs):
+        new_cls = type.__new__(cls, name, bases, attrs)
+        """
+            Here the name of the class is used as key but it could be any class
+            parameter.
+        """
+        cls.REGISTRY[new_cls.__name__] = new_cls
+        return new_cls
+
+    @classmethod
+    def get_registry(cls):
+        return dict(cls.REGISTRY)
+
+
+class BaseRegisteredClass(object):
+    __metaclass__ = RegistryHolder
+    """
+        Any class that will inherits from BaseRegisteredClass will be included
+        inside the dict RegistryHolder.REGISTRY, the key being the name of the
+        class and the associated value, the class itself.
+    """
+    pass
+
+
+if __name__ == "__main__":
+    print("Before subclassing: ")
+    for k in RegistryHolder.REGISTRY:
+        print(k)
+
+    class ClassRegistree(BaseRegisteredClass):
+        def __init__(self, *args, **kwargs):
+            pass
+
+    print("After subclassing: ")
+    for k in RegistryHolder.REGISTRY:
+        print(k)
+
+###  OUTPUT ###
+# Before subclassing:
+# BaseRegisteredClass
+# After subclassing:
+# BaseRegisteredClass
+# ClassRegistree
+<EOF>
+<BOF>
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+"""
+http://peter-hoffmann.com/2010/extrinsic-visitor-pattern-python-inheritance.html
+
+*TL;DR80
+Separates an algorithm from an object structure on which it operates.
+"""
+
+
+class Node(object):
+    pass
+
+
+class A(Node):
+    pass
+
+
+class B(Node):
+    pass
+
+
+class C(A, B):
+    pass
+
+
+class Visitor(object):
+    def visit(self, node, *args, **kwargs):
+        meth = None
+        for cls in node.__class__.__mro__:
+            meth_name = 'visit_' + cls.__name__
+            meth = getattr(self, meth_name, None)
+            if meth:
+                break
+
+        if not meth:
+            meth = self.generic_visit
+        return meth(node, *args, **kwargs)
+
+    def generic_visit(self, node, *args, **kwargs):
+        print('generic_visit ' + node.__class__.__name__)
+
+    def visit_B(self, node, *args, **kwargs):
+        print('visit_B ' + node.__class__.__name__)
+
+
+a = A()
+b = B()
+c = C()
+visitor = Visitor()
+visitor.visit(a)
+visitor.visit(b)
+visitor.visit(c)
+
+### OUTPUT ###
+# generic_visit A
+# visit_B B
+# visit_B C
+<EOF>
+<BOF>
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+"""
+Implementation of the state pattern
+
+http://ginstrom.com/scribbles/2007/10/08/design-patterns-python-style/
+
+*TL;DR80
+Implements state as a derived class of the state pattern interface.
+Implements state transitions by invoking methods from the pattern's superclass.
+"""
+
+from __future__ import print_function
+
+
+class State(object):
+
+    """Base state. This is to share functionality"""
+
+    def scan(self):
+        """Scan the dial to the next station"""
+        self.pos += 1
+        if self.pos == len(self.stations):
+            self.pos = 0
+        print(u"Scanning... Station is %s %s" % (self.stations[self.pos], self.name))
+
+
+class AmState(State):
+    def __init__(self, radio):
+        self.radio = radio
+        self.stations = ["1250", "1380", "1510"]
+        self.pos = 0
+        self.name = "AM"
+
+    def toggle_amfm(self):
+        print(u"Switching to FM")
+        self.radio.state = self.radio.fmstate
+
+
+class FmState(State):
+    def __init__(self, radio):
+        self.radio = radio
+        self.stations = ["81.3", "89.1", "103.9"]
+        self.pos = 0
+        self.name = "FM"
+
+    def toggle_amfm(self):
+        print(u"Switching to AM")
+        self.radio.state = self.radio.amstate
+
+
+class Radio(object):
+
+    """A radio.     It has a scan button, and an AM/FM toggle switch."""
+
+    def __init__(self):
+        """We have an AM state and an FM state"""
+        self.amstate = AmState(self)
+        self.fmstate = FmState(self)
+        self.state = self.amstate
+
+    def toggle_amfm(self):
+        self.state.toggle_amfm()
+
+    def scan(self):
+        self.state.scan()
+
+
+# Test our radio out
+if __name__ == '__main__':
+    radio = Radio()
+    actions = [radio.scan] * 2 + [radio.toggle_amfm] + [radio.scan] * 2
+    actions *= 2
+
+    for action in actions:
+        action()
+
+### OUTPUT ###
+# Scanning... Station is 1380 AM
+# Scanning... Station is 1510 AM
+# Switching to FM
+# Scanning... Station is 89.1 FM
+# Scanning... Station is 103.9 FM
+# Scanning... Station is 81.3 FM
+# Scanning... Station is 89.1 FM
+# Switching to AM
+# Scanning... Station is 1250 AM
+# Scanning... Station is 1380 AM
+<EOF>
+<BOF>
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+"""
+*What is this pattern about?
+This pattern aims to encapsulate each algorithm and allow them to be
+interchangeable. Separating algorithms allows the client to scale
+with larger and more complex algorithms, since the client and the
+strategies are kept independent of each other.
+
+Having the algorithms as an integral part of the client can cause the
+client to be larger and harder to maintain. This is more evident when
+supporting multiple algorithms. The separation of client and algorithm
+allows us to easily replace and vary the algorithm.
+
+*What does this example do?
+Below the 'StrategyExample' is an example of the client while the two
+functions; 'execute_replacement1' and 'execute_replacement2' are
+examples of the implementation or strategy. In the example we can see
+that the client can vary it's 'execute' method by changing the
+strategy which is responsible for implementation.
+
+http://stackoverflow.com/questions/963965/how-is-this-strategy-pattern
+ -written-in-python-the-sample-in-wikipedia
+In most of other languages Strategy pattern is implemented via creating some
+base strategy interface/abstract class and subclassing it with a number of
+concrete strategies (as we can see at
+http://en.wikipedia.org/wiki/Strategy_pattern), however Python supports
+higher-order functions and allows us to have only one class and inject
+functions into it's instances, as shown in this example.
+
+*TL;DR80
+Enables selecting an algorithm at runtime.
+"""
+
+import types
+
+
+class StrategyExample:
+    def __init__(self, func=None):
+        self.name = 'Strategy Example 0'
+        if func is not None:
+            self.execute = types.MethodType(func, self)
+
+    def execute(self):
+        print(self.name)
+
+
+def execute_replacement1(self):
+    print(self.name + ' from execute 1')
+
+
+def execute_replacement2(self):
+    print(self.name + ' from execute 2')
+
+
+if __name__ == '__main__':
+    strat0 = StrategyExample()
+
+    strat1 = StrategyExample(execute_replacement1)
+    strat1.name = 'Strategy Example 1'
+
+    strat2 = StrategyExample(execute_replacement2)
+    strat2.name = 'Strategy Example 2'
+
+    strat0.execute()
+    strat1.execute()
+    strat2.execute()
+
+### OUTPUT ###
+# Strategy Example 0
+# Strategy Example 1 from execute 1
+# Strategy Example 2 from execute 2
+<EOF>
+<BOF>
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+"""
+http://code.activestate.com/recipes/413838-memento-closure/
+
+*TL;DR80
+Provides the ability to restore an object to its previous state.
+"""
+
+from copy import copy
+from copy import deepcopy
+
+
+def memento(obj, deep=False):
+    state = deepcopy(obj.__dict__) if deep else copy(obj.__dict__)
+
+    def restore():
+        obj.__dict__.clear()
+        obj.__dict__.update(state)
+
+    return restore
+
+
+class Transaction(object):
+    """A transaction guard.
+
+    This is, in fact, just syntactic sugar around a memento closure.
+    """
+
+    deep = False
+    states = []
+
+    def __init__(self, deep, *targets):
+        self.deep = deep
+        self.targets = targets
+        self.commit()
+
+    def commit(self):
+        self.states = [memento(target, self.deep) for target in self.targets]
+
+    def rollback(self):
+        for a_state in self.states:
+            a_state()
+
+
+class Transactional(object):
+    """Adds transactional semantics to methods. Methods decorated  with
+
+    @Transactional will rollback to entry-state upon exceptions.
+    """
+
+    def __init__(self, method):
+        self.method = method
+
+    def __get__(self, obj, T):
+        def transaction(*args, **kwargs):
+            state = memento(obj)
+            try:
+                return self.method(obj, *args, **kwargs)
+            except Exception as e:
+                state()
+                raise e
+
+        return transaction
+
+
+class NumObj(object):
+    def __init__(self, value):
+        self.value = value
+
+    def __repr__(self):
+        return '<%s: %r>' % (self.__class__.__name__, self.value)
+
+    def increment(self):
+        self.value += 1
+
+    @Transactional
+    def do_stuff(self):
+        self.value = '1111'  # <- invalid value
+        self.increment()  # <- will fail and rollback
+
+
+if __name__ == '__main__':
+    num_obj = NumObj(-1)
+    print(num_obj)
+
+    a_transaction = Transaction(True, num_obj)
+    try:
+        for i in range(3):
+            num_obj.increment()
+            print(num_obj)
+        a_transaction.commit()
+        print('-- committed')
+
+        for i in range(3):
+            num_obj.increment()
+            print(num_obj)
+        num_obj.value += 'x'  # will fail
+        print(num_obj)
+    except Exception as e:
+        a_transaction.rollback()
+        print('-- rolled back')
+    print(num_obj)
+
+    print('-- now doing stuff ...')
+    try:
+        num_obj.do_stuff()
+    except Exception as e:
+        print('-> doing stuff failed!')
+        import sys
+        import traceback
+
+        traceback.print_exc(file=sys.stdout)
+    print(num_obj)
+
+
+### OUTPUT ###
+# <NumObj: -1>
+# <NumObj: 0>
+# <NumObj: 1>
+# <NumObj: 2>
+# -- committed
+# <NumObj: 3>
+# <NumObj: 4>
+# <NumObj: 5>
+# -- rolled back
+# <NumObj: 2>
+# -- now doing stuff ...
+# -> doing stuff failed!
+# Traceback (most recent call last):
+# File "memento.py", line 97, in <module>
+#     num_obj.do_stuff()
+#   File "memento.py", line 52, in transaction
+#     raise e
+#   File "memento.py", line 49, in transaction
+#     return self.method(obj, *args, **kwargs)
+#   File "memento.py", line 70, in do_stuff
+#     self.increment()     # <- will fail and rollback
+#   File "memento.py", line 65, in increment
+#     self.value += 1
+# TypeError: Can't convert 'int' object to str implicitly
+# <NumObj: 2>
+<EOF>
+<BOF>
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+"""
+http://code.activestate.com/recipes/131499-observer-pattern/
+
+*TL;DR80
+Maintains a list of dependents and notifies them of any state changes.
+"""
+
+from __future__ import print_function
+
+
+class Subject(object):
+    def __init__(self):
+        self._observers = []
+
+    def attach(self, observer):
+        if observer not in self._observers:
+            self._observers.append(observer)
+
+    def detach(self, observer):
+        try:
+            self._observers.remove(observer)
+        except ValueError:
+            pass
+
+    def notify(self, modifier=None):
+        for observer in self._observers:
+            if modifier != observer:
+                observer.update(self)
+
+
+# Example usage
+class Data(Subject):
+    def __init__(self, name=''):
+        Subject.__init__(self)
+        self.name = name
+        self._data = 0
+
+    @property
+    def data(self):
+        return self._data
+
+    @data.setter
+    def data(self, value):
+        self._data = value
+        self.notify()
+
+
+class HexViewer:
+    def update(self, subject):
+        print(u'HexViewer: Subject %s has data 0x%x' % (subject.name, subject.data))
+
+
+class DecimalViewer:
+    def update(self, subject):
+        print(u'DecimalViewer: Subject %s has data %d' % (subject.name, subject.data))
+
+
+# Example usage...
+def main():
+    data1 = Data('Data 1')
+    data2 = Data('Data 2')
+    view1 = DecimalViewer()
+    view2 = HexViewer()
+    data1.attach(view1)
+    data1.attach(view2)
+    data2.attach(view2)
+    data2.attach(view1)
+
+    print(u"Setting Data 1 = 10")
+    data1.data = 10
+    print(u"Setting Data 2 = 15")
+    data2.data = 15
+    print(u"Setting Data 1 = 3")
+    data1.data = 3
+    print(u"Setting Data 2 = 5")
+    data2.data = 5
+    print(u"Detach HexViewer from data1 and data2.")
+    data1.detach(view2)
+    data2.detach(view2)
+    print(u"Setting Data 1 = 10")
+    data1.data = 10
+    print(u"Setting Data 2 = 15")
+    data2.data = 15
+
+
+if __name__ == '__main__':
+    main()
+
+### OUTPUT ###
+# Setting Data 1 = 10
+# DecimalViewer: Subject Data 1 has data 10
+# HexViewer: Subject Data 1 has data 0xa
+# Setting Data 2 = 15
+# HexViewer: Subject Data 2 has data 0xf
+# DecimalViewer: Subject Data 2 has data 15
+# Setting Data 1 = 3
+# DecimalViewer: Subject Data 1 has data 3
+# HexViewer: Subject Data 1 has data 0x3
+# Setting Data 2 = 5
+# HexViewer: Subject Data 2 has data 0x5
+# DecimalViewer: Subject Data 2 has data 5
+# Detach HexViewer from data1 and data2.
+# Setting Data 1 = 10
+# DecimalViewer: Subject Data 1 has data 10
+# Setting Data 2 = 15
+# DecimalViewer: Subject Data 2 has data 15
+<EOF>
+<BOF>
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+"""
+A class that uses different static function depending of a parameter passed in
+init. Note the use of a single dictionary instead of multiple conditions
+"""
+
+__author__ = "Ibrahim Diop <ibrahim@sikilabs.com>"
+
+
+class Catalog(object):
+    """catalog of multiple static methods that are executed depending on an init
+
+    parameter
+    """
+
+    def __init__(self, param):
+
+        # dictionary that will be used to determine which static method is
+        # to be executed but that will be also used to store possible param
+        # value
+        self._static_method_choices = {'param_value_1': self._static_method_1, 'param_value_2': self._static_method_2}
+
+        # simple test to validate param value
+        if param in self._static_method_choices.keys():
+            self.param = param
+        else:
+            raise ValueError("Invalid Value for Param: {0}".format(param))
+
+    @staticmethod
+    def _static_method_1():
+        print("executed method 1!")
+
+    @staticmethod
+    def _static_method_2():
+        print("executed method 2!")
+
+    def main_method(self):
+        """will execute either _static_method_1 or _static_method_2
+
+        depending on self.param value
+        """
+        self._static_method_choices[self.param]()
+
+
+# Alternative implementation for different levels of methods
+class CatalogInstance(object):
+
+    """catalog of multiple methods that are executed depending on an init
+
+    parameter
+    """
+
+    def __init__(self, param):
+        self.x1 = 'x1'
+        self.x2 = 'x2'
+        # simple test to validate param value
+        if param in self._instance_method_choices:
+            self.param = param
+        else:
+            raise ValueError("Invalid Value for Param: {0}".format(param))
+
+    def _instance_method_1(self):
+        print("Value {}".format(self.x1))
+
+    def _instance_method_2(self):
+        print("Value {}".format(self.x2))
+
+    _instance_method_choices = {'param_value_1': _instance_method_1, 'param_value_2': _instance_method_2}
+
+    def main_method(self):
+        """will execute either _instance_method_1 or _instance_method_2
+
+        depending on self.param value
+        """
+        self._instance_method_choices[self.param].__get__(self)()
+
+
+class CatalogClass(object):
+
+    """catalog of multiple class methods that are executed depending on an init
+
+    parameter
+    """
+
+    x1 = 'x1'
+    x2 = 'x2'
+
+    def __init__(self, param):
+        # simple test to validate param value
+        if param in self._class_method_choices:
+            self.param = param
+        else:
+            raise ValueError("Invalid Value for Param: {0}".format(param))
+
+    @classmethod
+    def _class_method_1(cls):
+        print("Value {}".format(cls.x1))
+
+    @classmethod
+    def _class_method_2(cls):
+        print("Value {}".format(cls.x2))
+
+    _class_method_choices = {'param_value_1': _class_method_1, 'param_value_2': _class_method_2}
+
+    def main_method(self):
+        """will execute either _class_method_1 or _class_method_2
+
+        depending on self.param value
+        """
+        self._class_method_choices[self.param].__get__(None, self.__class__)()
+
+
+class CatalogStatic(object):
+
+    """catalog of multiple static methods that are executed depending on an init
+
+    parameter
+    """
+
+    def __init__(self, param):
+        # simple test to validate param value
+        if param in self._static_method_choices:
+            self.param = param
+        else:
+            raise ValueError("Invalid Value for Param: {0}".format(param))
+
+    @staticmethod
+    def _static_method_1():
+        print("executed method 1!")
+
+    @staticmethod
+    def _static_method_2():
+        print("executed method 2!")
+
+    _static_method_choices = {'param_value_1': _static_method_1, 'param_value_2': _static_method_2}
+
+    def main_method(self):
+        """will execute either _static_method_1 or _static_method_2
+
+        depending on self.param value
+        """
+        self._static_method_choices[self.param].__get__(None, self.__class__)()
+
+
+def main():
+    """
+    >>> c = Catalog('param_value_1').main_method()
+    executed method 1!
+    >>> Catalog('param_value_2').main_method()
+    executed method 2!
+    """
+
+    test = Catalog('param_value_2')
+    test.main_method()
+
+    test = CatalogInstance('param_value_1')
+    test.main_method()
+
+    test = CatalogClass('param_value_2')
+    test.main_method()
+
+    test = CatalogStatic('param_value_1')
+    test.main_method()
+
+
+if __name__ == "__main__":
+
+    main()
+
+### OUTPUT ###
+# executed method 2!
+# Value x1
+# Value x2
+# executed method 1!
+<EOF>
+<BOF>
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+"""
+http://ginstrom.com/scribbles/2007/10/08/design-patterns-python-style/
+Implementation of the iterator pattern with a generator
+
+*TL;DR80
+Traverses a container and accesses the container's elements.
+"""
+
+from __future__ import print_function
+
+
+def count_to(count):
+    """Counts by word numbers, up to a maximum of five"""
+    numbers = ["one", "two", "three", "four", "five"]
+    for number in numbers[:count]:
+        yield number
+
+
+# Test the generator
+count_to_two = lambda: count_to(2)
+count_to_five = lambda: count_to(5)
+
+print('Counting to two...')
+for number in count_to_two():
+    print(number, end=' ')
+
+print()
+
+print('Counting to five...')
+for number in count_to_five():
+    print(number, end=' ')
+
+print()
+
+### OUTPUT ###
+# Counting to two...
+# one two
+# Counting to five...
+# one two three four five
+<EOF>
+<BOF>
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+"""
+@author: Gordeev Andrey <gordeev.and.and@gmail.com>
+
+*TL;DR80
+Provides recombination business logic by chaining together using boolean logic.
+"""
+
+from abc import abstractmethod
+
+
+class Specification(object):
+    def and_specification(self, candidate):
+        raise NotImplementedError()
+
+    def or_specification(self, candidate):
+        raise NotImplementedError()
+
+    def not_specification(self):
+        raise NotImplementedError()
+
+    @abstractmethod
+    def is_satisfied_by(self, candidate):
+        pass
+
+
+class CompositeSpecification(Specification):
+    @abstractmethod
+    def is_satisfied_by(self, candidate):
+        pass
+
+    def and_specification(self, candidate):
+        return AndSpecification(self, candidate)
+
+    def or_specification(self, candidate):
+        return OrSpecification(self, candidate)
+
+    def not_specification(self):
+        return NotSpecification(self)
+
+
+class AndSpecification(CompositeSpecification):
+    _one = Specification()
+    _other = Specification()
+
+    def __init__(self, one, other):
+        self._one = one
+        self._other = other
+
+    def is_satisfied_by(self, candidate):
+        return bool(self._one.is_satisfied_by(candidate) and self._other.is_satisfied_by(candidate))
+
+
+class OrSpecification(CompositeSpecification):
+    _one = Specification()
+    _other = Specification()
+
+    def __init__(self, one, other):
+        self._one = one
+        self._other = other
+
+    def is_satisfied_by(self, candidate):
+        return bool(self._one.is_satisfied_by(candidate) or self._other.is_satisfied_by(candidate))
+
+
+class NotSpecification(CompositeSpecification):
+    _wrapped = Specification()
+
+    def __init__(self, wrapped):
+        self._wrapped = wrapped
+
+    def is_satisfied_by(self, candidate):
+        return bool(not self._wrapped.is_satisfied_by(candidate))
+
+
+class User(object):
+    def __init__(self, super_user=False):
+        self.super_user = super_user
+
+
+class UserSpecification(CompositeSpecification):
+    def is_satisfied_by(self, candidate):
+        return isinstance(candidate, User)
+
+
+class SuperUserSpecification(CompositeSpecification):
+    def is_satisfied_by(self, candidate):
+        return getattr(candidate, 'super_user', False)
+
+
+if __name__ == '__main__':
+    print('Specification')
+    andrey = User()
+    ivan = User(super_user=True)
+    vasiliy = 'not User instance'
+
+    root_specification = UserSpecification().and_specification(SuperUserSpecification())
+
+    print(root_specification.is_satisfied_by(andrey))
+    print(root_specification.is_satisfied_by(ivan))
+    print(root_specification.is_satisfied_by(vasiliy))
+
+
+### OUTPUT ###
+# Specification
+# False
+# True
+# False
+<EOF>
+<BOF>
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+"""
+*What is this pattern about?
+This pattern aims to decouple the senders of a request from its
+receivers. It does this by allowing a request to move through chained
+objects until it is handled by an appropriate receiver.
+
+This is useful as it reduces the number of connections between objects,
+since the sender does not need explicit knowledge of the handler, and
+the receiver won't need to refer to all potential receivers, but keeps
+a reference to a single successor.
+
+*References:
+http://www.dabeaz.com/coroutines/
+
+*TL;DR80
+Allow a request to pass down a chain of objects until an object handles
+the request.
+"""
+
+from contextlib import contextmanager
+import os
+import sys
+import time
+import abc
+
+
+class Handler(object):
+    __metaclass__ = abc.ABCMeta
+
+    def __init__(self, successor=None):
+        self._successor = successor
+
+    def handle(self, request):
+        res = self._handle(request)
+        if not res:
+            self._successor.handle(request)
+
+    @abc.abstractmethod
+    def _handle(self, request):
+        raise NotImplementedError('Must provide implementation in subclass.')
+
+
+class ConcreteHandler1(Handler):
+    def _handle(self, request):
+        if 0 < request <= 10:
+            print('request {} handled in handler 1'.format(request))
+            return True
+
+
+class ConcreteHandler2(Handler):
+    def _handle(self, request):
+        if 10 < request <= 20:
+            print('request {} handled in handler 2'.format(request))
+            return True
+
+
+class ConcreteHandler3(Handler):
+    def _handle(self, request):
+        if 20 < request <= 30:
+            print('request {} handled in handler 3'.format(request))
+            return True
+
+
+class DefaultHandler(Handler):
+    def _handle(self, request):
+        print('end of chain, no handler for {}'.format(request))
+        return True
+
+
+class Client(object):
+    def __init__(self):
+        self.handler = ConcreteHandler1(ConcreteHandler3(ConcreteHandler2(DefaultHandler())))
+
+    def delegate(self, requests):
+        for request in requests:
+            self.handler.handle(request)
+
+
+def coroutine(func):
+    def start(*args, **kwargs):
+        cr = func(*args, **kwargs)
+        next(cr)
+        return cr
+
+    return start
+
+
+@coroutine
+def coroutine1(target):
+    while True:
+        request = yield
+        if 0 < request <= 10:
+            print('request {} handled in coroutine 1'.format(request))
+        else:
+            target.send(request)
+
+
+@coroutine
+def coroutine2(target):
+    while True:
+        request = yield
+        if 10 < request <= 20:
+            print('request {} handled in coroutine 2'.format(request))
+        else:
+            target.send(request)
+
+
+@coroutine
+def coroutine3(target):
+    while True:
+        request = yield
+        if 20 < request <= 30:
+            print('request {} handled in coroutine 3'.format(request))
+        else:
+            target.send(request)
+
+
+@coroutine
+def default_coroutine():
+    while True:
+        request = yield
+        print('end of chain, no coroutine for {}'.format(request))
+
+
+class ClientCoroutine:
+    def __init__(self):
+        self.target = coroutine1(coroutine3(coroutine2(default_coroutine())))
+
+    def delegate(self, requests):
+        for request in requests:
+            self.target.send(request)
+
+
+def timeit(func):
+    def count(*args, **kwargs):
+        start = time.time()
+        res = func(*args, **kwargs)
+        count._time = time.time() - start
+        return res
+
+    return count
+
+
+@contextmanager
+def suppress_stdout():
+    try:
+        stdout, sys.stdout = sys.stdout, open(os.devnull, 'w')
+        yield
+    finally:
+        sys.stdout = stdout
+
+
+if __name__ == "__main__":
+    client1 = Client()
+    client2 = ClientCoroutine()
+    requests = [2, 5, 14, 22, 18, 3, 35, 27, 20]
+
+    client1.delegate(requests)
+    print('-' * 30)
+    client2.delegate(requests)
+
+    requests *= 10000
+    client1_delegate = timeit(client1.delegate)
+    client2_delegate = timeit(client2.delegate)
+    with suppress_stdout():
+        client1_delegate(requests)
+        client2_delegate(requests)
+    # lets check which is faster
+    print(client1_delegate._time, client2_delegate._time)
+
+### OUTPUT ###
+# request 2 handled in handler 1
+# request 5 handled in handler 1
+# request 14 handled in handler 2
+# request 22 handled in handler 3
+# request 18 handled in handler 2
+# request 3 handled in handler 1
+# end of chain, no handler for 35
+# request 27 handled in handler 3
+# request 20 handled in handler 2
+# ------------------------------
+# request 2 handled in coroutine 1
+# request 5 handled in coroutine 1
+# request 14 handled in coroutine 2
+# request 22 handled in coroutine 3
+# request 18 handled in coroutine 2
+# request 3 handled in coroutine 1
+# end of chain, no coroutine for 35
+# request 27 handled in coroutine 3
+# request 20 handled in coroutine 2
+# (0.2369999885559082, 0.16199994087219238)
+<EOF>
+<BOF>
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+from __future__ import print_function
+
+
+class Person(object):
+    def __init__(self, name, action):
+        self.name = name
+        self.action = action
+
+    def do_action(self):
+        print(self.name, self.action.name, end=' ')
+        return self.action
+
+
+class Action(object):
+    def __init__(self, name):
+        self.name = name
+
+    def amount(self, val):
+        print(val, end=' ')
+        return self
+
+    def stop(self):
+        print('then stop')
+
+
+if __name__ == '__main__':
+
+    move = Action('move')
+    person = Person('Jack', move)
+    person.do_action().amount('5m').stop()
+
+### OUTPUT ###
+# Jack move 5m then stop
+<EOF>
+<BOF>
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+"""
+*What is this pattern about?
+
+In Java and other languages, the Abstract Factory Pattern serves to provide an interface for
+creating related/dependent objects without need to specify their
+actual class.
+
+The idea is to abstract the creation of objects depending on business
+logic, platform choice, etc.
+
+In Python, the interface we use is simply a callable, which is "builtin" interface
+in Python, and in normal circumstances we can simply use the class itself as
+that callable, because classes are first class objects in Python.
+
+*What does this example do?
+This particular implementation abstracts the creation of a pet and
+does so depending on the factory we chose (Dog or Cat, or random_animal)
+This works because both Dog/Cat and random_animal respect a common
+interface (callable for creation and .speak()).
+Now my application can create pets abstractly and decide later,
+based on my own criteria, dogs over cats.
+
+*Where is the pattern used practically?
+
+*References:
+https://sourcemaking.com/design_patterns/abstract_factory
+http://ginstrom.com/scribbles/2007/10/08/design-patterns-python-style/
+
+*TL;DR80
+Provides a way to encapsulate a group of individual factories.
+"""
+
+import random
+
+
+class PetShop(object):
+
+    """A pet shop"""
+
+    def __init__(self, animal_factory=None):
+        """pet_factory is our abstract factory.  We can set it at will."""
+
+        self.pet_factory = animal_factory
+
+    def show_pet(self):
+        """Creates and shows a pet using the abstract factory"""
+
+        pet = self.pet_factory()
+        print("We have a lovely {}".format(pet))
+        print("It says {}".format(pet.speak()))
+
+
+class Dog(object):
+    def speak(self):
+        return "woof"
+
+    def __str__(self):
+        return "Dog"
+
+
+class Cat(object):
+    def speak(self):
+        return "meow"
+
+    def __str__(self):
+        return "Cat"
+
+
+# Additional factories:
+
+# Create a random animal
+def random_animal():
+    """Let's be dynamic!"""
+    return random.choice([Dog, Cat])()
+
+
+# Show pets with various factories
+if __name__ == "__main__":
+
+    # A Shop that sells only cats
+    cat_shop = PetShop(Cat)
+    cat_shop.show_pet()
+    print("")
+
+    # A shop that sells random animals
+    shop = PetShop(random_animal)
+    for i in range(3):
+        shop.show_pet()
+        print("=" * 20)
+
+### OUTPUT ###
+# We have a lovely Cat
+# It says meow
+#
+# We have a lovely Dog
+# It says woof
+# ====================
+# We have a lovely Cat
+# It says meow
+# ====================
+# We have a lovely Cat
+# It says meow
+# ====================
+<EOF>
+<BOF>
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+"""
+*What is this pattern about?
+This pattern is used when creating an object is costly (and they are
+created frequently) but only a few are used at a time. With a Pool we
+can manage those instances we have as of now by caching them. Now it
+is possible to skip the costly creation of an object if one is
+available in the pool.
+A pool allows to 'check out' an inactive object and then to return it.
+If none are available the pool creates one to provide without wait.
+
+*What does this example do?
+In this example queue.Queue is used to create the pool (wrapped in a
+custom ObjectPool object to use with the with statement), and it is
+populated with strings.
+As we can see, the first string object put in "yam" is USED by the
+with statement. But because it is released back into the pool
+afterwards it is reused by the explicit call to sample_queue.get().
+Same thing happens with "sam", when the ObjectPool created insided the
+function is deleted (by the GC) and the object is returned.
+
+*Where is the pattern used practically?
+
+*References:
+http://stackoverflow.com/questions/1514120/python-implementation-of-the-object-pool-design-pattern
+https://sourcemaking.com/design_patterns/object_pool
+
+*TL;DR80
+Stores a set of initialized objects kept ready to use.
+"""
+
+
+class ObjectPool(object):
+    def __init__(self, queue, auto_get=False):
+        self._queue = queue
+        self.item = self._queue.get() if auto_get else None
+
+    def __enter__(self):
+        if self.item is None:
+            self.item = self._queue.get()
+        return self.item
+
+    def __exit__(self, Type, value, traceback):
+        if self.item is not None:
+            self._queue.put(self.item)
+            self.item = None
+
+    def __del__(self):
+        if self.item is not None:
+            self._queue.put(self.item)
+            self.item = None
+
+
+def main():
+    try:
+        import queue
+    except ImportError:  # python 2.x compatibility
+        import Queue as queue
+
+    def test_object(queue):
+        pool = ObjectPool(queue, True)
+        print('Inside func: {}'.format(pool.item))
+
+    sample_queue = queue.Queue()
+
+    sample_queue.put('yam')
+    with ObjectPool(sample_queue) as obj:
+        print('Inside with: {}'.format(obj))
+    print('Outside with: {}'.format(sample_queue.get()))
+
+    sample_queue.put('sam')
+    test_object(sample_queue)
+    print('Outside func: {}'.format(sample_queue.get()))
+
+    if not sample_queue.empty():
+        print(sample_queue.get())
+
+
+if __name__ == '__main__':
+    main()
+
+### OUTPUT ###
+# Inside with: yam
+# Outside with: yam
+# Inside func: sam
+# Outside func: sam
+<EOF>
+<BOF>
+#!/usr/bin/python
+# -*- coding : utf-8 -*-
+
+"""
+*What is this pattern about?
+It decouples the creation of a complex object and its representation,
+so that the same process can be reused to build objects from the same
+family.
+This is useful when you must separate the specification of an object
+from its actual representation (generally for abstraction).
+
+*What does this example do?
+
+The first example achieves this by using an abstract base
+class for a building, where the initializer (__init__ method) specifies the
+steps needed, and the concrete subclasses implement these steps.
+
+In other programming languages, a more complex arrangement is sometimes
+necessary. In particular, you cannot have polymorphic behaviour in a constructor in C++ -
+see https://stackoverflow.com/questions/1453131/how-can-i-get-polymorphic-behavior-in-a-c-constructor
+- which means this Python technique will not work. The polymorphism
+required has to be provided by an external, already constructed
+instance of a different class.
+
+In general, in Python this won't be necessary, but a second example showing
+this kind of arrangement is also included.
+
+*Where is the pattern used practically?
+
+*References:
+https://sourcemaking.com/design_patterns/builder
+
+*TL;DR80
+Decouples the creation of a complex object and its representation.
+"""
+
+
+# Abstract Building
+class Building(object):
+    def __init__(self):
+        self.build_floor()
+        self.build_size()
+
+    def build_floor(self):
+        raise NotImplementedError
+
+    def build_size(self):
+        raise NotImplementedError
+
+    def __repr__(self):
+        return 'Floor: {0.floor} | Size: {0.size}'.format(self)
+
+
+# Concrete Buildings
+class House(Building):
+    def build_floor(self):
+        self.floor = 'One'
+
+    def build_size(self):
+        self.size = 'Big'
+
+
+class Flat(Building):
+    def build_floor(self):
+        self.floor = 'More than One'
+
+    def build_size(self):
+        self.size = 'Small'
+
+
+# In some very complex cases, it might be desirable to pull out the building
+# logic into another function (or a method on another class), rather than being
+# in the base class '__init__'. (This leaves you in the strange situation where
+# a concrete class does not have a useful constructor)
+
+
+class ComplexBuilding(object):
+    def __repr__(self):
+        return 'Floor: {0.floor} | Size: {0.size}'.format(self)
+
+
+class ComplexHouse(ComplexBuilding):
+    def build_floor(self):
+        self.floor = 'One'
+
+    def build_size(self):
+        self.size = 'Big and fancy'
+
+
+def construct_building(cls):
+    building = cls()
+    building.build_floor()
+    building.build_size()
+    return building
+
+
+# Client
+if __name__ == "__main__":
+    house = House()
+    print(house)
+    flat = Flat()
+    print(flat)
+
+    # Using an external constructor function:
+    complex_house = construct_building(ComplexHouse)
+    print(complex_house)
+
+### OUTPUT ###
+# Floor: One | Size: Big
+# Floor: More than One | Size: Small
+# Floor: One | Size: Big and fancy
+<EOF>
+<BOF>
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+"""
+*What is this pattern about?
+The Borg pattern (also known as the Monostate pattern) is a way to
+implement singleton behavior, but instead of having only one instance
+of a class, there are multiple instances that share the same state. In
+other words, the focus is on sharing state instead of sharing instance
+identity.
+
+*What does this example do?
+To understand the implementation of this pattern in Python, it is
+important to know that, in Python, instance attributes are stored in a
+attribute dictionary called __dict__. Usually, each instance will have
+its own dictionary, but the Borg pattern modifies this so that all
+instances have the same dictionary.
+In this example, the __shared_state attribute will be the dictionary
+shared between all instances, and this is ensured by assigining
+__shared_state to the __dict__ variable when initializing a new
+instance (i.e., in the __init__ method). Other attributes are usually
+added to the instance's attribute dictionary, but, since the attribute
+dictionary itself is shared (which is __shared_state), all other
+attributes will also be shared.
+For this reason, when the attribute self.state is modified using
+instance rm2, the value of self.state in instance rm1 also changes. The
+same happens if self.state is modified using rm3, which is an
+instance from a subclass.
+Notice that even though they share attributes, the instances are not
+the same, as seen by their ids.
+
+*Where is the pattern used practically?
+Sharing state is useful in applications like managing database connections:
+https://github.com/onetwopunch/pythonDbTemplate/blob/master/database.py
+
+*References:
+https://fkromer.github.io/python-pattern-references/design/#singleton
+
+*TL;DR80
+Provides singleton-like behavior sharing state between instances.
+"""
+
+
+class Borg(object):
+    __shared_state = {}
+
+    def __init__(self):
+        self.__dict__ = self.__shared_state
+        self.state = 'Init'
+
+    def __str__(self):
+        return self.state
+
+
+class YourBorg(Borg):
+    pass
+
+
+if __name__ == '__main__':
+    rm1 = Borg()
+    rm2 = Borg()
+
+    rm1.state = 'Idle'
+    rm2.state = 'Running'
+
+    print('rm1: {0}'.format(rm1))
+    print('rm2: {0}'.format(rm2))
+
+    rm2.state = 'Zombie'
+
+    print('rm1: {0}'.format(rm1))
+    print('rm2: {0}'.format(rm2))
+
+    print('rm1 id: {0}'.format(id(rm1)))
+    print('rm2 id: {0}'.format(id(rm2)))
+
+    rm3 = YourBorg()
+
+    print('rm1: {0}'.format(rm1))
+    print('rm2: {0}'.format(rm2))
+    print('rm3: {0}'.format(rm3))
+
+### OUTPUT ###
+# rm1: Running
+# rm2: Running
+# rm1: Zombie
+# rm2: Zombie
+# rm1 id: 140732837899224
+# rm2 id: 140732837899296
+# rm1: Init
+# rm2: Init
+# rm3: Init
+<EOF>
+<BOF>
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+"""
+Lazily-evaluated property pattern in Python.
+
+https://en.wikipedia.org/wiki/Lazy_evaluation
+
+*References:
+bottle
+https://github.com/bottlepy/bottle/blob/cafc15419cbb4a6cb748e6ecdccf92893bb25ce5/bottle.py#L270
+django
+https://github.com/django/django/blob/ffd18732f3ee9e6f0374aff9ccf350d85187fac2/django/utils/functional.py#L19
+pip
+https://github.com/pypa/pip/blob/cb75cca785629e15efb46c35903827b3eae13481/pip/utils/__init__.py#L821
+pyramimd
+https://github.com/Pylons/pyramid/blob/7909e9503cdfc6f6e84d2c7ace1d3c03ca1d8b73/pyramid/decorator.py#L4
+werkzeug
+https://github.com/pallets/werkzeug/blob/5a2bf35441006d832ab1ed5a31963cbc366c99ac/werkzeug/utils.py#L35
+
+*TL;DR80
+Delays the eval of an expr until its value is needed and avoids repeated evals.
+"""
+
+from __future__ import print_function
+import functools
+
+
+class lazy_property(object):
+    def __init__(self, function):
+        self.function = function
+        functools.update_wrapper(self, function)
+
+    def __get__(self, obj, type_):
+        if obj is None:
+            return self
+        val = self.function(obj)
+        obj.__dict__[self.function.__name__] = val
+        return val
+
+
+def lazy_property2(fn):
+    attr = '_lazy__' + fn.__name__
+
+    @property
+    def _lazy_property(self):
+        if not hasattr(self, attr):
+            setattr(self, attr, fn(self))
+        return getattr(self, attr)
+
+    return _lazy_property
+
+
+class Person(object):
+    def __init__(self, name, occupation):
+        self.name = name
+        self.occupation = occupation
+        self.call_count2 = 0
+
+    @lazy_property
+    def relatives(self):
+        # Get all relatives, let's assume that it costs much time.
+        relatives = "Many relatives."
+        return relatives
+
+    @lazy_property2
+    def parents(self):
+        self.call_count2 += 1
+        return "Father and mother"
+
+
+def main():
+    Jhon = Person('Jhon', 'Coder')
+    print(u"Name: {0}    Occupation: {1}".format(Jhon.name, Jhon.occupation))
+    print(u"Before we access `relatives`:")
+    print(Jhon.__dict__)
+    print(u"Jhon's relatives: {0}".format(Jhon.relatives))
+    print(u"After we've accessed `relatives`:")
+    print(Jhon.__dict__)
+    print(Jhon.parents)
+    print(Jhon.__dict__)
+    print(Jhon.parents)
+    print(Jhon.call_count2)
+
+
+if __name__ == '__main__':
+    main()
+
+### OUTPUT ###
+# Name: Jhon    Occupation: Coder
+# Before we access `relatives`:
+# {'call_count2': 0, 'name': 'Jhon', 'occupation': 'Coder'}
+# Jhon's relatives: Many relatives.
+# After we've accessed `relatives`:
+# {'relatives': 'Many relatives.', 'call_count2': 0, 'name': 'Jhon', 'occupation': 'Coder'}
+# Father and mother
+# {'_lazy__parents': 'Father and mother', 'relatives': 'Many relatives.', 'call_count2': 1, 'name': 'Jhon', 'occupation': 'Coder'}  # noqa flake8
+# Father and mother
+# 1
+<EOF>
+<BOF>
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+"""*What is this pattern about?
+The Factory Method pattern can be used to create an interface for a
+method, leaving the implementation to the class that gets
+instantiated.
+
+*What does this example do?
+The code shows a way to localize words in two languages: English and
+Greek. "getLocalizer" is the factory method that constructs a
+localizer depending on the language chosen. The localizer object will
+be an instance from a different class according to the language
+localized. However, the main code does not have to worry about which
+localizer will be instantiated, since the method "get" will be called
+in the same way independently of the language.
+
+*Where can the pattern be used practically?
+The Factory Method can be seen in the popular web framework Django:
+http://django.wikispaces.asu.edu/*NEW*+Django+Design+Patterns For
+example, in a contact form of a web page, the subject and the message
+fields are created using the same form factory (CharField()), even
+though they have different implementations according to their
+purposes.
+
+*References:
+http://ginstrom.com/scribbles/2007/10/08/design-patterns-python-style/
+https://fkromer.github.io/python-pattern-references/design/#factory-method
+https://sourcemaking.com/design_patterns/factory_method
+
+*TL;DR80
+Creates objects without having to specify the exact class.
+"""
+
+
+class GreekGetter(object):
+
+    """A simple localizer a la gettext"""
+
+    def __init__(self):
+        self.trans = dict(dog="σκύλος", cat="γάτα")
+
+    def get(self, msgid):
+        """We'll punt if we don't have a translation"""
+        return self.trans.get(msgid, str(msgid))
+
+
+class EnglishGetter(object):
+
+    """Simply echoes the msg ids"""
+
+    def get(self, msgid):
+        return str(msgid)
+
+
+def get_localizer(language="English"):
+    """The factory method"""
+    languages = dict(English=EnglishGetter, Greek=GreekGetter)
+    return languages[language]()
+
+
+if __name__ == '__main__':
+    # Create our localizers
+    e, g = get_localizer(language="English"), get_localizer(language="Greek")
+    # Localize some text
+    for msgid in "dog parrot cat bear".split():
+        print(e.get(msgid), g.get(msgid))
+
+### OUTPUT ###
+# dog σκύλος
+# parrot parrot
+# cat γάτα
+# bear bear
+<EOF>
+<BOF>
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+"""
+*What is this pattern about?
+This patterns aims to reduce the number of classes required by an
+application. Instead of relying on subclasses it creates objects by
+copying a prototypical instance at run-time.
+
+This is useful as it make it easier to derive new kinds of objects,
+when instances of the class have only a few different combinations of
+state, and when instantiation is expensive.
+
+*What does this example do?
+When the number of prototypes in an application can vary, it can be
+useful to keep a Dispatcher (aka, Registry or Manager). This allows
+clients to query the Dispatcher for a prototype before cloning a new
+instance.
+
+Below provides an example of such Dispatcher, which contains three
+copies of the prototype: 'default', 'objecta' and 'objectb'.
+
+*TL;DR80
+Creates new object instances by cloning prototype.
+"""
+
+
+class Prototype(object):
+
+    value = 'default'
+
+    def clone(self, **attrs):
+        """Clone a prototype and update inner attributes dictionary"""
+        # Python in Practice, Mark Summerfield
+        obj = self.__class__()
+        obj.__dict__.update(attrs)
+        return obj
+
+
+class PrototypeDispatcher(object):
+    def __init__(self):
+        self._objects = {}
+
+    def get_objects(self):
+        """Get all objects"""
+        return self._objects
+
+    def register_object(self, name, obj):
+        """Register an object"""
+        self._objects[name] = obj
+
+    def unregister_object(self, name):
+        """Unregister an object"""
+        del self._objects[name]
+
+
+def main():
+    dispatcher = PrototypeDispatcher()
+    prototype = Prototype()
+
+    d = prototype.clone()
+    a = prototype.clone(value='a-value', category='a')
+    b = prototype.clone(value='b-value', is_checked=True)
+    dispatcher.register_object('objecta', a)
+    dispatcher.register_object('objectb', b)
+    dispatcher.register_object('default', d)
+    print([{n: p.value} for n, p in dispatcher.get_objects().items()])
+
+
+if __name__ == '__main__':
+    main()
+
+### OUTPUT ###
+# [{'objectb': 'b-value'}, {'default': 'default'}, {'objecta': 'a-value'}]
+<EOF>
+<BOF>
+#!/usr/bin/python
+# -*- coding : utf-8 -*-
+import datetime
+
+"""
+Port of the Java example of "Constructor Injection" in
+"xUnit Test Patterns - Refactoring Test Code" by Gerard Meszaros
+(ISBN-10: 0131495054, ISBN-13: 978-0131495050)
+
+production code which is untestable:
+
+class TimeDisplay(object):
+
+    def __init__(self):
+        self.time_provider = datetime.datetime
+
+    def get_current_time_as_html_fragment(self):
+        current_time = self.time_provider.now()
+        current_time_as_html_fragment = "<span class=\"tinyBoldText\">{}</span>".format(current_time)
+        return current_time_as_html_fragment
+"""
+
+
+class TimeDisplay(object):
+    def __init__(self, time_provider):
+        self.time_provider = time_provider
+
+    def get_current_time_as_html_fragment(self):
+        current_time = self.time_provider.now()
+        current_time_as_html_fragment = "<span class=\"tinyBoldText\">{}</span>".format(current_time)
+        return current_time_as_html_fragment
+
+
+class ProductionCodeTimeProvider(object):
+    """
+    Production code version of the time provider (just a wrapper for formatting
+    datetime for this example).
+    """
+
+    def now(self):
+        current_time = datetime.datetime.now()
+        current_time_formatted = "{}:{}".format(current_time.hour, current_time.minute)
+        return current_time_formatted
+
+
+class MidnightTimeProvider(object):
+    """
+    Class implemented as hard-coded stub (in contrast to configurable stub).
+    """
+
+    def now(self):
+        current_time_is_always_midnight = "24:01"
+        return current_time_is_always_midnight
+<EOF>
+<BOF>
+#!/usr/bin/python
+# -*- coding : utf-8 -*-
+import datetime
+
+"""
+Port of the Java example of "Setter Injection" in
+"xUnit Test Patterns - Refactoring Test Code" by Gerard Meszaros
+(ISBN-10: 0131495054, ISBN-13: 978-0131495050) accessible in outdated version on
+http://xunitpatterns.com/Dependency%20Injection.html.
+
+production code which is untestable:
+
+class TimeDisplay(object):
+
+    def __init__(self):
+        self.time_provider = datetime.datetime
+
+    def get_current_time_as_html_fragment(self):
+        current_time = self.time_provider.now()
+        current_time_as_html_fragment = "<span class=\"tinyBoldText\">{}</span>".format(current_time)
+        return current_time_as_html_fragment
+"""
+
+
+class TimeDisplay(object):
+    def __init__(self):
+        pass
+
+    def set_time_provider(self, time_provider):
+        self.time_provider = time_provider
+
+    def get_current_time_as_html_fragment(self):
+        current_time = self.time_provider.now()
+        current_time_as_html_fragment = "<span class=\"tinyBoldText\">{}</span>".format(current_time)
+        return current_time_as_html_fragment
+
+
+class ProductionCodeTimeProvider(object):
+    """
+    Production code version of the time provider (just a wrapper for formatting
+    datetime for this example).
+    """
+
+    def now(self):
+        current_time = datetime.datetime.now()
+        current_time_formatted = "{}:{}".format(current_time.hour, current_time.minute)
+        return current_time_formatted
+
+
+class MidnightTimeProvider(object):
+    """
+    Class implemented as hard-coded stub (in contrast to configurable stub).
+    """
+
+    def now(self):
+        current_time_is_always_midnight = "24:01"
+        return current_time_is_always_midnight
+<EOF>
+<BOF>
+#!/usr/bin/python
+# -*- coding : utf-8 -*-
+import datetime
+
+"""
+Port of the Java example of "Parameter Injection" in
+"xUnit Test Patterns - Refactoring Test Code" by Gerard Meszaros
+(ISBN-10: 0131495054, ISBN-13: 978-0131495050) accessible in outdated version on
+http://xunitpatterns.com/Dependency%20Injection.html.
+
+production code which is untestable:
+
+class TimeDisplay(object):
+
+    def __init__(self):
+        self.time_provider = datetime.datetime
+
+    def get_current_time_as_html_fragment(self):
+        current_time = self.time_provider.now()
+        current_time_as_html_fragment = "<span class=\"tinyBoldText\">{}</span>".format(current_time)
+        return current_time_as_html_fragment
+"""
+
+
+class TimeDisplay(object):
+    def __init__(self):
+        pass
+
+    def get_current_time_as_html_fragment(self, time_provider):
+        current_time = time_provider.now()
+        current_time_as_html_fragment = "<span class=\"tinyBoldText\">{}</span>".format(current_time)
+        return current_time_as_html_fragment
+
+
+class ProductionCodeTimeProvider(object):
+    """
+    Production code version of the time provider (just a wrapper for formatting
+    datetime for this example).
+    """
+
+    def now(self):
+        current_time = datetime.datetime.now()
+        current_time_formatted = "{}:{}".format(current_time.hour, current_time.minute)
+        return current_time_formatted
+
+
+class MidnightTimeProvider(object):
+    """
+    Class implemented as hard-coded stub (in contrast to configurable stub).
+    """
+
+    def now(self):
+        current_time_is_always_midnight = "24:01"
+        return current_time_is_always_midnight
+<EOF>
+<BOF>
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+"""
+@author: Eugene Duboviy <eugene.dubovoy@gmail.com> | github.com/duboviy
+
+In Blackboard pattern several specialised sub-systems (knowledge sources)
+assemble their knowledge to build a possibly partial or approximate solution.
+In this way, the sub-systems work together to solve the problem,
+where the solution is the sum of its parts.
+
+https://en.wikipedia.org/wiki/Blackboard_system
+"""
+
+import abc
+import random
+
+
+class Blackboard(object):
+    def __init__(self):
+        self.experts = []
+        self.common_state = {
+            'problems': 0,
+            'suggestions': 0,
+            'contributions': [],
+            'progress': 0,  # percentage, if 100 -> task is finished
+        }
+
+    def add_expert(self, expert):
+        self.experts.append(expert)
+
+
+class Controller(object):
+    def __init__(self, blackboard):
+        self.blackboard = blackboard
+
+    def run_loop(self):
+        while self.blackboard.common_state['progress'] < 100:
+            for expert in self.blackboard.experts:
+                if expert.is_eager_to_contribute:
+                    expert.contribute()
+        return self.blackboard.common_state['contributions']
+
+
+class AbstractExpert(object):
+
+    __metaclass__ = abc.ABCMeta
+
+    def __init__(self, blackboard):
+        self.blackboard = blackboard
+
+    @abc.abstractproperty
+    def is_eager_to_contribute(self):
+        raise NotImplementedError('Must provide implementation in subclass.')
+
+    @abc.abstractmethod
+    def contribute(self):
+        raise NotImplementedError('Must provide implementation in subclass.')
+
+
+class Student(AbstractExpert):
+    @property
+    def is_eager_to_contribute(self):
+        return True
+
+    def contribute(self):
+        self.blackboard.common_state['problems'] += random.randint(1, 10)
+        self.blackboard.common_state['suggestions'] += random.randint(1, 10)
+        self.blackboard.common_state['contributions'] += [self.__class__.__name__]
+        self.blackboard.common_state['progress'] += random.randint(1, 2)
+
+
+class Scientist(AbstractExpert):
+    @property
+    def is_eager_to_contribute(self):
+        return random.randint(0, 1)
+
+    def contribute(self):
+        self.blackboard.common_state['problems'] += random.randint(10, 20)
+        self.blackboard.common_state['suggestions'] += random.randint(10, 20)
+        self.blackboard.common_state['contributions'] += [self.__class__.__name__]
+        self.blackboard.common_state['progress'] += random.randint(10, 30)
+
+
+class Professor(AbstractExpert):
+    @property
+    def is_eager_to_contribute(self):
+        return True if self.blackboard.common_state['problems'] > 100 else False
+
+    def contribute(self):
+        self.blackboard.common_state['problems'] += random.randint(1, 2)
+        self.blackboard.common_state['suggestions'] += random.randint(10, 20)
+        self.blackboard.common_state['contributions'] += [self.__class__.__name__]
+        self.blackboard.common_state['progress'] += random.randint(10, 100)
+
+
+if __name__ == '__main__':
+    blackboard = Blackboard()
+
+    blackboard.add_expert(Student(blackboard))
+    blackboard.add_expert(Scientist(blackboard))
+    blackboard.add_expert(Professor(blackboard))
+
+    c = Controller(blackboard)
+    contributions = c.run_loop()
+
+    from pprint import pprint
+
+    pprint(contributions)
+
+### OUTPUT ###
+# ['Student',
+#  'Student',
+#  'Scientist',
+#  'Student',
+#  'Scientist',
+#  'Student',
+#  'Scientist',
+#  'Student',
+#  'Scientist',
+#  'Student',
+#  'Scientist',
+#  'Professor']
+<EOF>
+<BOF>
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+""
+
+
+class GraphSearch:
+
+    """Graph search emulation in python, from source
+    http://www.python.org/doc/essays/graphs/"""
+
+    def __init__(self, graph):
+        self.graph = graph
+
+    def find_path(self, start, end, path=None):
+        path = path or []
+
+        path.append(start)
+        if start == end:
+            return path
+        for node in self.graph.get(start, []):
+            if node not in path:
+                newpath = self.find_path(node, end, path[:])
+                if newpath:
+                    return newpath
+
+    def find_all_path(self, start, end, path=None):
+        path = path or []
+        path.append(start)
+        if start == end:
+            return [path]
+        paths = []
+        for node in self.graph.get(start, []):
+            if node not in path:
+                newpaths = self.find_all_path(node, end, path[:])
+                paths.extend(newpaths)
+        return paths
+
+    def find_shortest_path(self, start, end, path=None):
+        path = path or []
+        path.append(start)
+
+        if start == end:
+            return path
+        shortest = None
+        for node in self.graph.get(start, []):
+            if node not in path:
+                newpath = self.find_shortest_path(node, end, path[:])
+                if newpath:
+                    if not shortest or len(newpath) < len(shortest):
+                        shortest = newpath
+        return shortest
+
+
+# example of graph usage
+graph = {'A': ['B', 'C'], 'B': ['C', 'D'], 'C': ['D'], 'D': ['C'], 'E': ['F'], 'F': ['C']}
+
+# initialization of new graph search object
+graph1 = GraphSearch(graph)
+
+
+print(graph1.find_path('A', 'D'))
+print(graph1.find_all_path('A', 'D'))
+print(graph1.find_shortest_path('A', 'D'))
+
+### OUTPUT ###
+# ['A', 'B', 'C', 'D']
+# [['A', 'B', 'C', 'D'], ['A', 'B', 'D'], ['A', 'C', 'D']]
+# ['A', 'B', 'D']
+<EOF>
+<BOF>
+"""
+Implementation of the HSM (hierarchical state machine) or
+NFSM (nested finite state machine) C++ example from
+http://www.eventhelix.com/RealtimeMantra/HierarchicalStateMachine.htm#.VwqLVEL950w
+in Python
+
+- single source 'message type' for state transition changes
+- message type considered, messages (comment) not considered to avoid complexity
+"""
+
+
+class UnsupportedMessageType(BaseException):
+    pass
+
+
+class UnsupportedState(BaseException):
+    pass
+
+
+class UnsupportedTransition(BaseException):
+    pass
+
+
+class HierachicalStateMachine(object):
+    def __init__(self):
+        self._active_state = Active(self)  # Unit.Inservice.Active()
+        self._standby_state = Standby(self)  # Unit.Inservice.Standby()
+        self._suspect_state = Suspect(self)  # Unit.OutOfService.Suspect()
+        self._failed_state = Failed(self)  # Unit.OutOfService.Failed()
+        self._current_state = self._standby_state
+        self.states = {
+            'active': self._active_state,
+            'standby': self._standby_state,
+            'suspect': self._suspect_state,
+            'failed': self._failed_state,
+        }
+        self.message_types = {
+            'fault trigger': self._current_state.on_fault_trigger,
+            'switchover': self._current_state.on_switchover,
+            'diagnostics passed': self._current_state.on_diagnostics_passed,
+            'diagnostics failed': self._current_state.on_diagnostics_failed,
+            'operator inservice': self._current_state.on_operator_inservice,
+        }
+
+    def _next_state(self, state):
+        try:
+            self._current_state = self.states[state]
+        except KeyError:
+            raise UnsupportedState
+
+    def _send_diagnostics_request(self):
+        return 'send diagnostic request'
+
+    def _raise_alarm(self):
+        return 'raise alarm'
+
+    def _clear_alarm(self):
+        return 'clear alarm'
+
+    def _perform_switchover(self):
+        return 'perform switchover'
+
+    def _send_switchover_response(self):
+        return 'send switchover response'
+
+    def _send_operator_inservice_response(self):
+        return 'send operator inservice response'
+
+    def _send_diagnostics_failure_report(self):
+        return 'send diagnostics failure report'
+
+    def _send_diagnostics_pass_report(self):
+        return 'send diagnostics pass report'
+
+    def _abort_diagnostics(self):
+        return 'abort diagnostics'
+
+    def _check_mate_status(self):
+        return 'check mate status'
+
+    def on_message(self, message_type):  # message ignored
+        if message_type in self.message_types.keys():
+            self.message_types[message_type]()
+        else:
+            raise UnsupportedMessageType
+
+
+class Unit(object):
+    def __init__(self, HierachicalStateMachine):
+        self.hsm = HierachicalStateMachine
+
+    def on_switchover(self):
+        raise UnsupportedTransition
+
+    def on_fault_trigger(self):
+        raise UnsupportedTransition
+
+    def on_diagnostics_failed(self):
+        raise UnsupportedTransition
+
+    def on_diagnostics_passed(self):
+        raise UnsupportedTransition
+
+    def on_operator_inservice(self):
+        raise UnsupportedTransition
+
+
+class Inservice(Unit):
+    def __init__(self, HierachicalStateMachine):
+        self._hsm = HierachicalStateMachine
+
+    def on_fault_trigger(self):
+        self._hsm._next_state('suspect')
+        self._hsm._send_diagnostics_request()
+        self._hsm._raise_alarm()
+
+    def on_switchover(self):
+        self._hsm._perform_switchover()
+        self._hsm._check_mate_status()
+        self._hsm._send_switchover_response()
+
+
+class Active(Inservice):
+    def __init__(self, HierachicalStateMachine):
+        self._hsm = HierachicalStateMachine
+
+    def on_fault_trigger(self):
+        super(Active, self).perform_switchover()
+        super(Active, self).on_fault_trigger()
+
+    def on_switchover(self):
+        self._hsm.on_switchover()  # message ignored
+        self._hsm.next_state('standby')
+
+
+class Standby(Inservice):
+    def __init__(self, HierachicalStateMachine):
+        self._hsm = HierachicalStateMachine
+
+    def on_switchover(self):
+        super(Standby, self).on_switchover()  # message ignored
+        self._hsm._next_state('active')
+
+
+class OutOfService(Unit):
+    def __init__(self, HierachicalStateMachine):
+        self._hsm = HierachicalStateMachine
+
+    def on_operator_inservice(self):
+        self._hsm.on_switchover()  # message ignored
+        self._hsm.send_operator_inservice_response()
+        self._hsm.next_state('suspect')
+
+
+class Suspect(OutOfService):
+    def __init__(self, HierachicalStateMachine):
+        self._hsm = HierachicalStateMachine
+
+    def on_diagnostics_failed(self):
+        super(Suspect, self).send_diagnostics_failure_report()
+        super(Suspect, self).next_state('failed')
+
+    def on_diagnostics_passed(self):
+        super(Suspect, self).send_diagnostics_pass_report()
+        super(Suspect, self).clear_alarm()  # loss of redundancy alarm
+        super(Suspect, self).next_state('standby')
+
+    def on_operator_inservice(self):
+        super(Suspect, self).abort_diagnostics()
+        super(Suspect, self).on_operator_inservice()  # message ignored
+
+
+class Failed(OutOfService):
+    """No need to override any method."""
+
+    def __init__(self, HierachicalStateMachine):
+        self._hsm = HierachicalStateMachine
+<EOF>
+<BOF>
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+"""
+*TL;DR80
+Provides an interface to resource that is expensive to duplicate.
+"""
+
+from __future__ import print_function
+import time
+
+
+class SalesManager:
+    def talk(self):
+        print("Sales Manager ready to talk")
+
+
+class Proxy:
+    def __init__(self):
+        self.busy = 'No'
+        self.sales = None
+
+    def talk(self):
+        print("Proxy checking for Sales Manager availability")
+        if self.busy == 'No':
+            self.sales = SalesManager()
+            time.sleep(0.1)
+            self.sales.talk()
+        else:
+            time.sleep(0.1)
+            print("Sales Manager is busy")
+
+
+class NoTalkProxy(Proxy):
+    def talk(self):
+        print("Proxy checking for Sales Manager availability")
+        time.sleep(0.1)
+        print("This Sales Manager will not talk to you", "whether he/she is busy or not")
+
+
+if __name__ == '__main__':
+    p = Proxy()
+    p.talk()
+    p.busy = 'Yes'
+    p.talk()
+    p = NoTalkProxy()
+    p.talk()
+    p.busy = 'Yes'
+    p.talk()
+
+### OUTPUT ###
+# Proxy checking for Sales Manager availability
+# Sales Manager ready to talk
+# Proxy checking for Sales Manager availability
+# Sales Manager is busy
+# Proxy checking for Sales Manager availability
+# This Sales Manager will not talk to you whether he/she is busy or not
+# Proxy checking for Sales Manager availability
+# This Sales Manager will not talk to you whether he/she is busy or not
+<EOF>
+<BOF>
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+"""
+*What is this pattern about?
+The Facade pattern is a way to provide a simpler unified interface to
+a more complex system. It provides an easier way to access functions
+of the underlying system by providing a single entry point.
+This kind of abstraction is seen in many real life situations. For
+example, we can turn on a computer by just pressing a button, but in
+fact there are many procedures and operations done when that happens
+(e.g., loading programs from disk to memory). In this case, the button
+serves as an unified interface to all the underlying procedures to
+turn on a computer.
+
+*What does this example do?
+The code defines three classes (TC1, TC2, TC3) that represent complex
+parts to be tested. Instead of testing each class separately, the
+TestRunner class acts as the facade to run all tests with only one
+call to the method runAll. By doing that, the client part only needs
+to instantiate the class TestRunner and call the runAll method.
+As seen in the example, the interface provided by the Facade pattern
+is independent from the underlying implementation. Since the client
+just calls the runAll method, we can modify the classes TC1, TC2 or
+TC3 without impact on the way the client uses the system.
+
+*Where is the pattern used practically?
+This pattern can be seen in the Python standard library when we use
+the isdir function. Although a user simply uses this function to know
+whether a path refers to a directory, the system makes a few
+operations and calls other modules (e.g., os.stat) to give the result.
+
+*References:
+https://sourcemaking.com/design_patterns/facade
+https://fkromer.github.io/python-pattern-references/design/#facade
+http://python-3-patterns-idioms-test.readthedocs.io/en/latest/ChangeInterface.html#facade
+
+*TL;DR80
+Provides a simpler unified interface to a complex system.
+"""
+
+from __future__ import print_function
+import time
+
+SLEEP = 0.1
+
+
+# Complex Parts
+class TC1:
+    def run(self):
+        print(u"###### In Test 1 ######")
+        time.sleep(SLEEP)
+        print(u"Setting up")
+        time.sleep(SLEEP)
+        print(u"Running test")
+        time.sleep(SLEEP)
+        print(u"Tearing down")
+        time.sleep(SLEEP)
+        print(u"Test Finished\n")
+
+
+class TC2:
+    def run(self):
+        print(u"###### In Test 2 ######")
+        time.sleep(SLEEP)
+        print(u"Setting up")
+        time.sleep(SLEEP)
+        print(u"Running test")
+        time.sleep(SLEEP)
+        print(u"Tearing down")
+        time.sleep(SLEEP)
+        print(u"Test Finished\n")
+
+
+class TC3:
+    def run(self):
+        print(u"###### In Test 3 ######")
+        time.sleep(SLEEP)
+        print(u"Setting up")
+        time.sleep(SLEEP)
+        print(u"Running test")
+        time.sleep(SLEEP)
+        print(u"Tearing down")
+        time.sleep(SLEEP)
+        print(u"Test Finished\n")
+
+
+# Facade
+class TestRunner:
+    def __init__(self):
+        self.tc1 = TC1()
+        self.tc2 = TC2()
+        self.tc3 = TC3()
+        self.tests = [self.tc1, self.tc2, self.tc3]
+
+    def runAll(self):
+        [i.run() for i in self.tests]
+
+
+# Client
+if __name__ == '__main__':
+    testrunner = TestRunner()
+    testrunner.runAll()
+
+### OUTPUT ###
+# ###### In Test 1 ######
+# Setting up
+# Running test
+# Tearing down
+# Test Finished
+#
+# ###### In Test 2 ######
+# Setting up
+# Running test
+# Tearing down
+# Test Finished
+#
+# ###### In Test 3 ######
+# Setting up
+# Running test
+# Tearing down
+# Test Finished
+#
+<EOF>
+<BOF>
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+"""
+*TL;DR80
+Separates presentation, application processing, and data management functions.
+"""
+
+
+class Data(object):
+    """ Data Store Class """
+
+    products = {
+        'milk': {'price': 1.50, 'quantity': 10},
+        'eggs': {'price': 0.20, 'quantity': 100},
+        'cheese': {'price': 2.00, 'quantity': 10},
+    }
+
+    def __get__(self, obj, klas):
+        print("(Fetching from Data Store)")
+        return {'products': self.products}
+
+
+class BusinessLogic(object):
+    """ Business logic holding data store instances """
+
+    data = Data()
+
+    def product_list(self):
+        return self.data['products'].keys()
+
+    def product_information(self, product):
+        return self.data['products'].get(product, None)
+
+
+class Ui(object):
+    """ UI interaction class """
+
+    def __init__(self):
+        self.business_logic = BusinessLogic()
+
+    def get_product_list(self):
+        print('PRODUCT LIST:')
+        for product in self.business_logic.product_list():
+            print(product)
+        print('')
+
+    def get_product_information(self, product):
+        product_info = self.business_logic.product_information(product)
+        if product_info:
+            print('PRODUCT INFORMATION:')
+            print(
+                'Name: {0}, Price: {1:.2f}, Quantity: {2:}'.format(
+                    product.title(), product_info.get('price', 0), product_info.get('quantity', 0)
+                )
+            )
+        else:
+            print('That product "{0}" does not exist in the records'.format(product))
+
+
+def main():
+    ui = Ui()
+    ui.get_product_list()
+    ui.get_product_information('cheese')
+    ui.get_product_information('eggs')
+    ui.get_product_information('milk')
+    ui.get_product_information('arepas')
+
+
+if __name__ == '__main__':
+    main()
+
+### OUTPUT ###
+# PRODUCT LIST:
+# (Fetching from Data Store)
+# cheese
+# eggs
+# milk
+#
+# (Fetching from Data Store)
+# PRODUCT INFORMATION:
+# Name: Cheese, Price: 2.00, Quantity: 10
+# (Fetching from Data Store)
+# PRODUCT INFORMATION:
+# Name: Eggs, Price: 0.20, Quantity: 100
+# (Fetching from Data Store)
+# PRODUCT INFORMATION:
+# Name: Milk, Price: 1.50, Quantity: 10
+# (Fetching from Data Store)
+# That product "arepas" does not exist in the records
+<EOF>
+<BOF>
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+"""
+*What is this pattern about?
+The composite pattern describes a group of objects that is treated the
+same way as a single instance of the same type of object. The intent of
+a composite is to "compose" objects into tree structures to represent
+part-whole hierarchies. Implementing the composite pattern lets clients
+treat individual objects and compositions uniformly.
+
+*What does this example do?
+The example implements a graphic class，which can be either an ellipse
+or a composition of several graphics. Every graphic can be printed.
+
+*Where is the pattern used practically?
+In graphics editors a shape can be basic or complex. An example of a
+simple shape is a line, where a complex shape is a rectangle which is
+made of four line objects. Since shapes have many operations in common
+such as rendering the shape to screen, and since shapes follow a
+part-whole hierarchy, composite pattern can be used to enable the
+program to deal with all shapes uniformly.
+
+*References:
+https://en.wikipedia.org/wiki/Composite_pattern
+https://infinitescript.com/2014/10/the-23-gang-of-three-design-patterns/
+
+*TL;DR80
+Describes a group of objects that is treated as a single instance.
+"""
+
+
+class Graphic:
+    def render(self):
+        raise NotImplementedError("You should implement this.")
+
+
+class CompositeGraphic(Graphic):
+    def __init__(self):
+        self.graphics = []
+
+    def render(self):
+        for graphic in self.graphics:
+            graphic.render()
+
+    def add(self, graphic):
+        self.graphics.append(graphic)
+
+    def remove(self, graphic):
+        self.graphics.remove(graphic)
+
+
+class Ellipse(Graphic):
+    def __init__(self, name):
+        self.name = name
+
+    def render(self):
+        print("Ellipse: {}".format(self.name))
+
+
+if __name__ == '__main__':
+    ellipse1 = Ellipse("1")
+    ellipse2 = Ellipse("2")
+    ellipse3 = Ellipse("3")
+    ellipse4 = Ellipse("4")
+
+    graphic1 = CompositeGraphic()
+    graphic2 = CompositeGraphic()
+
+    graphic1.add(ellipse1)
+    graphic1.add(ellipse2)
+    graphic1.add(ellipse3)
+    graphic2.add(ellipse4)
+
+    graphic = CompositeGraphic()
+
+    graphic.add(graphic1)
+    graphic.add(graphic2)
+
+    graphic.render()
+
+### OUTPUT ###
+# Ellipse: 1
+# Ellipse: 2
+# Ellipse: 3
+# Ellipse: 4
+<EOF>
+<BOF>
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+"""
+*TL;DR80
+Separates data in GUIs from the ways it is presented, and accepted.
+"""
+
+
+class Model(object):
+    def __iter__(self):
+        raise NotImplementedError
+
+    def get(self, item):
+        """Returns an object with a .items() call method
+        that iterates over key,value pairs of its information."""
+        raise NotImplementedError
+
+    @property
+    def item_type(self):
+        raise NotImplementedError
+
+
+class ProductModel(Model):
+    class Price(float):
+        """A polymorphic way to pass a float with a particular
+        __str__ functionality."""
+
+        def __str__(self):
+            return "{:.2f}".format(self)
+
+    products = {
+        'milk': {'price': Price(1.50), 'quantity': 10},
+        'eggs': {'price': Price(0.20), 'quantity': 100},
+        'cheese': {'price': Price(2.00), 'quantity': 10},
+    }
+
+    item_type = 'product'
+
+    def __iter__(self):
+        for item in self.products:
+            yield item
+
+    def get(self, product):
+        try:
+            return self.products[product]
+        except KeyError as e:
+            raise KeyError((str(e) + " not in the model's item list."))
+
+
+class View(object):
+    def show_item_list(self, item_type, item_list):
+        raise NotImplementedError
+
+    def show_item_information(self, item_type, item_name, item_info):
+        """Will look for item information by iterating over key,value pairs
+        yielded by item_info.items()"""
+        raise NotImplementedError
+
+    def item_not_found(self, item_type, item_name):
+        raise NotImplementedError
+
+
+class ConsoleView(View):
+    def show_item_list(self, item_type, item_list):
+        print(item_type.upper() + ' LIST:')
+        for item in item_list:
+            print(item)
+        print('')
+
+    @staticmethod
+    def capitalizer(string):
+        return string[0].upper() + string[1:].lower()
+
+    def show_item_information(self, item_type, item_name, item_info):
+        print(item_type.upper() + ' INFORMATION:')
+        printout = 'Name: %s' % item_name
+        for key, value in item_info.items():
+            printout += ', ' + self.capitalizer(str(key)) + ': ' + str(value)
+        printout += '\n'
+        print(printout)
+
+    def item_not_found(self, item_type, item_name):
+        print('That %s "%s" does not exist in the records' % (item_type, item_name))
+
+
+class Controller(object):
+    def __init__(self, model, view):
+        self.model = model
+        self.view = view
+
+    def show_items(self):
+        items = list(self.model)
+        item_type = self.model.item_type
+        self.view.show_item_list(item_type, items)
+
+    def show_item_information(self, item_name):
+        try:
+            item_info = self.model.get(item_name)
+        except Exception:
+            item_type = self.model.item_type
+            self.view.item_not_found(item_type, item_name)
+        else:
+            item_type = self.model.item_type
+            self.view.show_item_information(item_type, item_name, item_info)
+
+
+if __name__ == '__main__':
+
+    model = ProductModel()
+    view = ConsoleView()
+    controller = Controller(model, view)
+    controller.show_items()
+    controller.show_item_information('cheese')
+    controller.show_item_information('eggs')
+    controller.show_item_information('milk')
+    controller.show_item_information('arepas')
+
+
+### OUTPUT ###
+# PRODUCT LIST:
+# cheese
+# eggs
+# milk
+#
+# PRODUCT INFORMATION:
+# Name: Cheese, Price: 2.00, Quantity: 10
+#
+# PRODUCT INFORMATION:
+# Name: Eggs, Price: 0.20, Quantity: 100
+#
+# PRODUCT INFORMATION:
+# Name: Milk, Price: 1.50, Quantity: 10
+#
+# That product "arepas" does not exist in the records
+<EOF>
+<BOF>
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+"""
+*What is this pattern about?
+This pattern aims to minimise the number of objects that are needed by
+a program at run-time. A Flyweight is an object shared by multiple
+contexts, and is indistinguishable from an object that is not shared.
+
+The state of a Flyweight should not be affected by it's context, this
+is known as its intrinsic state. The decoupling of the objects state
+from the object's context, allows the Flyweight to be shared.
+
+*What does this example do?
+The example below sets-up an 'object pool' which stores initialised
+objects. When a 'Card' is created it first checks to see if it already
+exists instead of creating a new one. This aims to reduce the number of
+objects initialised by the program.
+
+*References:
+http://codesnipers.com/?q=python-flyweights
+
+*TL;DR80
+Minimizes memory usage by sharing data with other similar objects.
+"""
+
+import weakref
+
+
+class FlyweightMeta(type):
+    def __new__(mcs, name, parents, dct):
+        """
+        Set up object pool
+
+        :param name: class name
+        :param parents: class parents
+        :param dct: dict: includes class attributes, class methods,
+        static methods, etc
+        :return: new class
+        """
+        dct['pool'] = weakref.WeakValueDictionary()
+        return super(FlyweightMeta, mcs).__new__(mcs, name, parents, dct)
+
+    @staticmethod
+    def _serialize_params(cls, *args, **kwargs):
+        """
+        Serialize input parameters to a key.
+        Simple implementation is just to serialize it as a string
+        """
+        args_list = list(map(str, args))
+        args_list.extend([str(kwargs), cls.__name__])
+        key = ''.join(args_list)
+        return key
+
+    def __call__(cls, *args, **kwargs):
+        key = FlyweightMeta._serialize_params(cls, *args, **kwargs)
+        pool = getattr(cls, 'pool', {})
+
+        instance = pool.get(key)
+        if instance is None:
+            instance = super(FlyweightMeta, cls).__call__(*args, **kwargs)
+            pool[key] = instance
+        return instance
+
+
+class Card(object):
+
+    """The object pool. Has builtin reference counting"""
+
+    _CardPool = weakref.WeakValueDictionary()
+
+    """Flyweight implementation. If the object exists in the
+    pool just return it (instead of creating a new one)"""
+
+    def __new__(cls, value, suit):
+        obj = Card._CardPool.get(value + suit)
+        if not obj:
+            obj = object.__new__(cls)
+            Card._CardPool[value + suit] = obj
+            obj.value, obj.suit = value, suit
+        return obj
+
+    # def __init__(self, value, suit):
+    #     self.value, self.suit = value, suit
+
+    def __repr__(self):
+        return "<Card: %s%s>" % (self.value, self.suit)
+
+
+def with_metaclass(meta, *bases):
+    """ Provide python cross-version metaclass compatibility. """
+    return meta("NewBase", bases, {})
+
+
+class Card2(with_metaclass(FlyweightMeta)):
+    def __init__(self, *args, **kwargs):
+        # print('Init {}: {}'.format(self.__class__, (args, kwargs)))
+        pass
+
+
+if __name__ == '__main__':
+    # comment __new__ and uncomment __init__ to see the difference
+    c1 = Card('9', 'h')
+    c2 = Card('9', 'h')
+    print(c1, c2)
+    print(c1 == c2, c1 is c2)
+    print(id(c1), id(c2))
+
+    c1.temp = None
+    c3 = Card('9', 'h')
+    print(hasattr(c3, 'temp'))
+    c1 = c2 = c3 = None
+    c3 = Card('9', 'h')
+    print(hasattr(c3, 'temp'))
+
+    # Tests with metaclass
+    instances_pool = getattr(Card2, 'pool')
+    cm1 = Card2('10', 'h', a=1)
+    cm2 = Card2('10', 'h', a=1)
+    cm3 = Card2('10', 'h', a=2)
+
+    assert (cm1 == cm2) != cm3
+    assert (cm1 is cm2) is not cm3
+    assert len(instances_pool) == 2
+
+    del cm1
+    assert len(instances_pool) == 2
+
+    del cm2
+    assert len(instances_pool) == 1
+
+    del cm3
+    assert len(instances_pool) == 0
+
+### OUTPUT ###
+# (<Card: 9h>, <Card: 9h>)
+# (True, True)
+# (31903856, 31903856)
+# True
+# False
+<EOF>
+<BOF>
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+"""
+*What is this pattern about?
+The Adapter pattern provides a different interface for a class. We can
+think about it as a cable adapter that allows you to charge a phone
+somewhere that has outlets in a different shape. Following this idea,
+the Adapter pattern is useful to integrate classes that couldn't be
+integrated due to their incompatible interfaces.
+
+*What does this example do?
+
+The example has classes that represent entities (Dog, Cat, Human, Car)
+that make different noises. The Adapter class provides a different
+interface to the original methods that make such noises. So the
+original interfaces (e.g., bark and meow) are available under a
+different name: make_noise.
+
+*Where is the pattern used practically?
+The Grok framework uses adapters to make objects work with a
+particular API without modifying the objects themselves:
+http://grok.zope.org/doc/current/grok_overview.html#adapters
+
+*References:
+http://ginstrom.com/scribbles/2008/11/06/generic-adapter-class-in-python/
+https://sourcemaking.com/design_patterns/adapter
+http://python-3-patterns-idioms-test.readthedocs.io/en/latest/ChangeInterface.html#adapter
+
+*TL;DR80
+Allows the interface of an existing class to be used as another interface.
+"""
+
+
+class Dog(object):
+    def __init__(self):
+        self.name = "Dog"
+
+    def bark(self):
+        return "woof!"
+
+
+class Cat(object):
+    def __init__(self):
+        self.name = "Cat"
+
+    def meow(self):
+        return "meow!"
+
+
+class Human(object):
+    def __init__(self):
+        self.name = "Human"
+
+    def speak(self):
+        return "'hello'"
+
+
+class Car(object):
+    def __init__(self):
+        self.name = "Car"
+
+    def make_noise(self, octane_level):
+        return "vroom{0}".format("!" * octane_level)
+
+
+class Adapter(object):
+    """
+    Adapts an object by replacing methods.
+    Usage:
+    dog = Dog()
+    dog = Adapter(dog, make_noise=dog.bark)
+
+    >>> objects = []
+    >>> dog = Dog()
+    >>> print(dog.__dict__)
+    {'name': 'Dog'}
+    >>> objects.append(Adapter(dog, make_noise=dog.bark))
+    >>> print(objects[0].original_dict())
+    {'name': 'Dog'}
+    >>> cat = Cat()
+    >>> objects.append(Adapter(cat, make_noise=cat.meow))
+    >>> human = Human()
+    >>> objects.append(Adapter(human, make_noise=human.speak))
+    >>> car = Car()
+    >>> car_noise = lambda: car.make_noise(3)
+    >>> objects.append(Adapter(car, make_noise=car_noise))
+
+    >>> for obj in objects:
+    ...     print('A {} goes {}'.format(obj.name, obj.make_noise()))
+    A Dog goes woof!
+    A Cat goes meow!
+    A Human goes 'hello'
+    A Car goes vroom!!!
+    """
+
+    def __init__(self, obj, **adapted_methods):
+        """We set the adapted methods in the object's dict"""
+        self.obj = obj
+        self.__dict__.update(adapted_methods)
+
+    def __getattr__(self, attr):
+        """All non-adapted calls are passed to the object"""
+        return getattr(self.obj, attr)
+
+    def original_dict(self):
+        """Print original object dict"""
+        return self.obj.__dict__
+
+
+def main():
+
+    objects = []
+    dog = Dog()
+    print(dog.__dict__)
+    objects.append(Adapter(dog, make_noise=dog.bark))
+    print(objects[0].__dict__)
+    print(objects[0].original_dict())
+    cat = Cat()
+    objects.append(Adapter(cat, make_noise=cat.meow))
+    human = Human()
+    objects.append(Adapter(human, make_noise=human.speak))
+    car = Car()
+    objects.append(Adapter(car, make_noise=lambda: car.make_noise(3)))
+
+    for obj in objects:
+        print("A {0} goes {1}".format(obj.name, obj.make_noise()))
+
+
+if __name__ == "__main__":
+    main()
+
+### OUTPUT ###
+# {'name': 'Dog'}
+# {'make_noise': <bound method Dog.bark of <__main__.Dog object at 0x7f631ba3fb00>>, 'obj': <__main__.Dog object at 0x7f631ba3fb00>}    # noqa flake8
+# {'name': 'Dog'}
+# A Dog goes woof!
+# A Cat goes meow!
+# A Human goes 'hello'
+# A Car goes vroom!!!
+<EOF>
+<BOF>
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+"""
+*What is this pattern about?
+The Decorator pattern is used to dynamically add a new feature to an
+object without changing its implementation. It differs from
+inheritance because the new feature is added only to that particular
+object, not to the entire subclass.
+
+*What does this example do?
+This example shows a way to add formatting options (boldface and
+italic) to a text by appending the corresponding tags (<b> and
+<i>). Also, we can see that decorators can be applied one after the other,
+since the original text is passed to the bold wrapper, which in turn
+is passed to the italic wrapper.
+
+*Where is the pattern used practically?
+The Grok framework uses decorators to add functionalities to methods,
+like permissions or subscription to an event:
+http://grok.zope.org/doc/current/reference/decorators.html
+
+*References:
+https://sourcemaking.com/design_patterns/decorator
+
+*TL;DR80
+Adds behaviour to object without affecting its class.
+"""
+
+from __future__ import print_function
+
+
+class TextTag(object):
+    """Represents a base text tag"""
+
+    def __init__(self, text):
+        self._text = text
+
+    def render(self):
+        return self._text
+
+
+class BoldWrapper(TextTag):
+    """Wraps a tag in <b>"""
+
+    def __init__(self, wrapped):
+        self._wrapped = wrapped
+
+    def render(self):
+        return "<b>{}</b>".format(self._wrapped.render())
+
+
+class ItalicWrapper(TextTag):
+    """Wraps a tag in <i>"""
+
+    def __init__(self, wrapped):
+        self._wrapped = wrapped
+
+    def render(self):
+        return "<i>{}</i>".format(self._wrapped.render())
+
+
+if __name__ == '__main__':
+    simple_hello = TextTag("hello, world!")
+    special_hello = ItalicWrapper(BoldWrapper(simple_hello))
+    print("before:", simple_hello.render())
+    print("after:", special_hello.render())
+
+### OUTPUT ###
+# before: hello, world!
+# after: <i><b>hello, world!</b></i>
+<EOF>
+<BOF>
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+"""
+@author: Gordeev Andrey <gordeev.and.and@gmail.com>
+
+*TL;DR80
+Provides a centralized entry point that controls and manages request handling.
+"""
+
+
+class MobileView(object):
+    def show_index_page(self):
+        print('Displaying mobile index page')
+
+
+class TabletView(object):
+    def show_index_page(self):
+        print('Displaying tablet index page')
+
+
+class Dispatcher(object):
+    def __init__(self):
+        self.mobile_view = MobileView()
+        self.tablet_view = TabletView()
+
+    def dispatch(self, request):
+        if request.type == Request.mobile_type:
+            self.mobile_view.show_index_page()
+        elif request.type == Request.tablet_type:
+            self.tablet_view.show_index_page()
+        else:
+            print('cant dispatch the request')
+
+
+class RequestController(object):
+    """ front controller """
+
+    def __init__(self):
+        self.dispatcher = Dispatcher()
+
+    def dispatch_request(self, request):
+        if isinstance(request, Request):
+            self.dispatcher.dispatch(request)
+        else:
+            print('request must be a Request object')
+
+
+class Request(object):
+    """ request """
+
+    mobile_type = 'mobile'
+    tablet_type = 'tablet'
+
+    def __init__(self, request):
+        self.type = None
+        request = request.lower()
+        if request == self.mobile_type:
+            self.type = self.mobile_type
+        elif request == self.tablet_type:
+            self.type = self.tablet_type
+
+
+if __name__ == '__main__':
+    front_controller = RequestController()
+    front_controller.dispatch_request(Request('mobile'))
+    front_controller.dispatch_request(Request('tablet'))
+
+    front_controller.dispatch_request(Request('desktop'))
+    front_controller.dispatch_request('mobile')
+
+
+### OUTPUT ###
+# Displaying mobile index page
+# Displaying tablet index page
+# cant dispatch the request
+# request must be a Request object
+<EOF>
+<BOF>
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+"""
+*References:
+http://en.wikibooks.org/wiki/Computer_Science_Design_Patterns/Bridge_Pattern#Python
+
+*TL;DR80
+Decouples an abstraction from its implementation.
+"""
+
+
+# ConcreteImplementor 1/2
+class DrawingAPI1(object):
+    def draw_circle(self, x, y, radius):
+        print('API1.circle at {}:{} radius {}'.format(x, y, radius))
+
+
+# ConcreteImplementor 2/2
+class DrawingAPI2(object):
+    def draw_circle(self, x, y, radius):
+        print('API2.circle at {}:{} radius {}'.format(x, y, radius))
+
+
+# Refined Abstraction
+class CircleShape(object):
+    def __init__(self, x, y, radius, drawing_api):
+        self._x = x
+        self._y = y
+        self._radius = radius
+        self._drawing_api = drawing_api
+
+    # low-level i.e. Implementation specific
+    def draw(self):
+        self._drawing_api.draw_circle(self._x, self._y, self._radius)
+
+    # high-level i.e. Abstraction specific
+    def scale(self, pct):
+        self._radius *= pct
+
+
+def main():
+    shapes = (CircleShape(1, 2, 3, DrawingAPI1()), CircleShape(5, 7, 11, DrawingAPI2()))
+
+    for shape in shapes:
+        shape.scale(2.5)
+        shape.draw()
+
+
+if __name__ == '__main__':
+    main()
+
+### OUTPUT ###
+# API1.circle at 1:2 radius 7.5
+# API2.circle at 5:7 radius 27.5
+<EOF>
