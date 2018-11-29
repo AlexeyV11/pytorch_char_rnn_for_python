@@ -186,11 +186,34 @@ def train_model(model, dataloader, loss_function, optimizer, batch_size, epochs,
             if iter % show_iterations == 0:
                 print("Training loss for iter {} : ".format(iter), loss_total.data.cpu().numpy())
 
+                generate_string(model, dataloader.dataset)
             iter += 1
 
     if show_time:
         print("Compute training time {}".format(time_total))
 
+
+def generate_string(model, dataset):
+    model.eval()
+
+    str = "<BOF>\n"
+    str_enc = dataset.encode(str)
+
+    next = torch.Tensor(str_enc[np.newaxis, :, :]).cuda().permute([1, 0, 2])
+
+    model.init_hidden_state(1)
+
+    for i in range(200):
+        out = model.forward(next)
+
+        # take last result; add dimension
+        next = out[-1,:,:][np.newaxis,:,:]
+
+        str += dataset.decode(out[-1,:].cpu().detach().numpy())
+
+    print(str)
+    print()
+    model.train()
 if False:
 
     def test_model(model, dataloader, init_sequence_length, show_time=False, show_graphs=False):
@@ -261,7 +284,7 @@ def main():
     HIDDEN_NEURONS=100
     NUM_LAYERS = 2
 
-    experiment(nn.GRU, SEQUENCE_LENGTH, BATCH_SIZE, HIDDEN_NEURONS, NUM_LAYERS, LEARNING_RATE, NUM_EPOCHS, show_time=False, show_graphs=True, show_iterations=50)
+    experiment(nn.GRU, SEQUENCE_LENGTH, BATCH_SIZE, HIDDEN_NEURONS, NUM_LAYERS, LEARNING_RATE, NUM_EPOCHS, show_time=False, show_graphs=True, show_iterations=500)
 
 
 if __name__ == '__main__':
