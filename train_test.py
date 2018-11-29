@@ -45,10 +45,11 @@ class MyRNN(nn.Module):
 class MyDataset(Dataset):
 
     # split is an array of [x0, ... , x_end]
-    def __init__(self, path_to_data, seq_length, occurrence_min=1000):
+    def __init__(self, path_to_data, seq_length, occurrence_min=1000, one_hot_mode=True):
         self._path_to_data = path_to_data
         self._seq_length = seq_length
         self._occurrence_min = 1000
+        self._one_hot_mode = one_hot_mode
 
         files = os.listdir(self._path_to_data)
 
@@ -94,6 +95,10 @@ class MyDataset(Dataset):
         # add unknown to dict in case if RNN generate one
         self.int2char[unknown_code] = unknown_char
 
+    def get_class_count(self):
+        # or len(self.char2int) + 1
+        return len(self.int2char)
+
     def encode(self, str):
         return [self.char2int[s] for s in str]
 
@@ -104,13 +109,28 @@ class MyDataset(Dataset):
         return len(self._data) - self._seq_length - 1
 
     def __getitem__(self, idx):
-            # [x0, .., xn]
-            seq = self._data[idx:idx + self._seq_length + 1]
+        # [x0, .., xn]
+        seq = self._data[idx:idx + self._seq_length + 1]
 
+        encoded = np.array(self.encode(seq), dtype=np.float32)
 
-            encoded = self.encode(seq)
+        if self._one_hot_mode:
+            encoded = self.one_hot_encode(encoded)
 
-            return encoded[:-1], encoded[1:]
+        return encoded[:-1,:], encoded[1:,:]
+
+    def one_hot_encode(self, batch):
+
+        # Initialize the the encoded array
+        one_hot = np.zeros((batch.size, self.get_class_count()), dtype=np.float32)
+
+        # Fill the appropriate elements with ones
+        one_hot[np.arange(one_hot.shape[0]), batch.flatten().astype(dtype=np.int)] = 1.
+
+        # Finally reshape it to get back to the original array
+        one_hot = one_hot.reshape((*batch.shape, self.get_class_count()))
+
+        return one_hot
 
 
 if False:
@@ -198,9 +218,10 @@ def experiment(rnn_type, seq_leng, batch_size, hidden_n, layers_n, learning_rate
     dataset = MyDataset("code_data", seq_leng)
     dataset.compute_embeddings()
 
+
     dataloder = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=True)
 
-    #rnn = MyRNN(rnn_type, hidden_size=hidden_n, num_layers=layers_n).to(DEVICE)
+    rnn = MyRNN(rnn_type, hidden_size=hidden_n, num_layers=layers_n).to(DEVICE)
 
     #optimizer = torch.optim.Adam(rnn.parameters(), lr=learning_rate)
     #loss_function = nn.MSELoss()
