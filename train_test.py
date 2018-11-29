@@ -69,8 +69,9 @@ class MyDataset(Dataset):
                     data_chunks.append(code_tmp)
 
         self._data = "".join(data_chunks)
+        self._init_embeddings()
 
-    def compute_embeddings(self):
+    def _init_embeddings(self):
         print("size of code database is {} characters".format(len(self._data)))
 
         cntr = collections.Counter(self._data)
@@ -105,23 +106,29 @@ class MyDataset(Dataset):
         # or len(self.char2int) + 1
         return len(self.int2char)
 
-    def encode(self, str):
+    def _str_to_nums(self, str):
         return [self.char2int[s] for s in str]
 
+    def encode(self, str):
+        encoded = np.array(self._str_to_nums(str), dtype=np.float32)
+
+        if self._one_hot_mode:
+            encoded = self.one_hot_encode(encoded)
+
+        return encoded
+
     def decode(self, arr):
+        if self._one_hot_mode:
+            arr = np.argmax(arr, axis=1)
+
         return "".join([self.int2char[s] for s in arr])
 
     def __len__(self):
         return len(self._data) - self._seq_length - 1
 
     def __getitem__(self, idx):
-        # [x0, .., xn]
-        seq = self._data[idx:idx + self._seq_length + 1]
-
-        encoded = np.array(self.encode(seq), dtype=np.float32)
-
-        if self._one_hot_mode:
-            encoded = self.one_hot_encode(encoded)
+        # 1 extra leng to generate input + output
+        encoded = self.encode(self._data[idx:idx + self._seq_length + 1])
 
         return encoded[:-1,:], encoded[1:,:]
 
@@ -233,8 +240,6 @@ if False:
 def experiment(rnn_type, seq_leng, batch_size, hidden_n, layers_n, learning_rate, epochs_n, show_time=False, show_graphs=False, show_iterations=100):
 
     dataset = MyDataset("code_data", seq_leng)
-    dataset.compute_embeddings()
-
 
     dataloder = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=True)
 
