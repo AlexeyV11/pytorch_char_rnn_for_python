@@ -18,16 +18,20 @@ DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 
 class MyRNN(nn.Module):
-    def __init__(self, rnn_type, hidden_size, num_layers=1, dropout_rate=0.0):
+    def __init__(self, rnn_type, input_size, hidden_size, num_layers, dropout_rate=0.0):
         super(MyRNN, self).__init__()
 
-        self.num_layers = num_layers
-        self.hidden_size = hidden_size
+        # we input and output one hot character
+        self._input_size = input_size
+        self._output_size = input_size
+
+        self._hidden_size = hidden_size
+        self._num_layers = num_layers
 
         # rnn layer
-        self.rnn = rnn_type(input_size=1, hidden_size=hidden_size, num_layers=self.num_layers, dropout=dropout_rate)
+        self.rnn = rnn_type(input_size=self._input_size, hidden_size=self._hidden_size, num_layers=self._num_layers, dropout=dropout_rate)
         # linear layer for regression
-        self.out = nn.Linear(hidden_size, 1)
+        self.out = nn.Linear(self._hidden_size, self._output_size )
 
     def init_hidden_state(self, batch_size):
         self.hidden_state = torch.zeros([self.num_layers, batch_size, self.hidden_size]).to(DEVICE)
@@ -221,8 +225,9 @@ def experiment(rnn_type, seq_leng, batch_size, hidden_n, layers_n, learning_rate
 
     dataloder = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=True)
 
-    rnn = MyRNN(rnn_type, hidden_size=hidden_n, num_layers=layers_n).to(DEVICE)
+    rnn = MyRNN(rnn_type, input_size=dataset.get_class_count(), hidden_size=hidden_n, num_layers=layers_n).to(DEVICE)
 
+    z = 1
     #optimizer = torch.optim.Adam(rnn.parameters(), lr=learning_rate)
     #loss_function = nn.MSELoss()
 
