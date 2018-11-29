@@ -33,13 +33,15 @@ class MyRNN(nn.Module):
         # linear layer for regression
         self.out = nn.Linear(self._hidden_size, self._output_size )
 
+        self._hidden_state = None
+
     def init_hidden_state(self, batch_size):
-        self.hidden_state = torch.zeros([self.num_layers, batch_size, self.hidden_size]).to(DEVICE)
+        self._hidden_state = torch.zeros([self._num_layers, batch_size, self._hidden_size]).to(DEVICE)
 
     # input of shape (seq_len, batch, input_size):
     # hidden_state of shape (num_layers * num_directions, batch, hidden_size):
     def forward(self, x):
-        result, self.hidden_state = self.rnn(x, self.hidden_state)
+        result, self._hidden_state = self.rnn(x, self._hidden_state)
         result = self.out(result[:, :, :])
         return result
 
@@ -137,41 +139,52 @@ class MyDataset(Dataset):
         return one_hot
 
 
+def train_model(model, dataloader, loss_function, optimizer, batch_size, epochs, show_time=False, show_iterations=10):
+    model.train()
+    loss_all = []
+
+    time_total = 0
+    iter = 0
+    for epoch in range(0,epochs):
+        for x_batch, y_batch in dataloader:
+            # new batch - new data so re-init hidden state + null the grads
+            model.init_hidden_state(batch_size)
+            optimizer.zero_grad()
+
+            x_batch = x_batch.permute([1, 0, 2])
+            y_batch = y_batch.permute([1, 0, 2])
+
+            x_batch, y_batch = x_batch.to(DEVICE), y_batch.to(DEVICE)
+
+            start = time.time()
+
+            # backpropogate results for all the timesteps
+            output = model(x_batch)
+
+
+            loss_total = 0
+            for c in range(y_batch.shape[0]):
+                #loss_total += loss_function(output[c, :, :], y_batch[c, :, :].type(torch.LongTensor).to(DEVICE))
+                loss_total += loss_function(output[c, :, :], torch.max(y_batch[c, :, :], 1)[1].to(DEVICE))
+
+
+
+            loss_total.backward()
+            optimizer.step()
+
+            time_total += time.time() - start
+
+            loss_all.append(loss_total.cpu().data.numpy())
+
+            if iter % show_iterations == 0:
+                print("Training loss for iter {} : ".format(iter), loss_total.data.cpu().numpy())
+
+            iter += 1
+
+    if show_time:
+        print("Compute training time {}".format(time_total))
+
 if False:
-    def train_model(model, dataloader, loss_function, optimizer, batch_size, epochs, show_time=False, show_epoch_freq=10):
-        model.train()
-        loss_all = []
-
-        time_total = 0
-        for epoch in range(0,epochs):
-            for x_batch, y_batch in dataloader:
-                # new batch - new data so re-init hidden state + null the grads
-                model.init_hidden_state(batch_size)
-                optimizer.zero_grad()
-
-                x_batch = x_batch[:,:,np.newaxis].permute([1, 0, 2])
-                y_batch = y_batch[:,:,np.newaxis].permute([1, 0, 2])
-
-                x_batch, y_batch = x_batch.to(DEVICE), y_batch.to(DEVICE)
-
-                start = time.time()
-
-                # backpropogate results for all the timesteps
-                output = model(x_batch)
-                loss = loss_function(output, y_batch)
-                loss.backward()
-                optimizer.step()
-
-                time_total += time.time() - start
-
-            loss_all.append(loss.cpu().data.numpy())
-
-            if epoch % show_epoch_freq == 0:
-                print("Training loss for epoch {} : ".format(epoch), loss.cpu().data.numpy())
-
-        if show_time:
-            print("Compute training time {}".format(time_total))
-
 
     def test_model(model, dataloader, init_sequence_length, show_time=False, show_graphs=False):
         model.eval()
@@ -217,7 +230,7 @@ if False:
         return final_outputs
 
 
-def experiment(rnn_type, seq_leng, batch_size, hidden_n, layers_n, learning_rate, epochs_n, show_time=False, show_graphs=False, show_epoch_freq=10):
+def experiment(rnn_type, seq_leng, batch_size, hidden_n, layers_n, learning_rate, epochs_n, show_time=False, show_graphs=False, show_iterations=100):
 
     dataset = MyDataset("code_data", seq_leng)
     dataset.compute_embeddings()
@@ -227,11 +240,11 @@ def experiment(rnn_type, seq_leng, batch_size, hidden_n, layers_n, learning_rate
 
     rnn = MyRNN(rnn_type, input_size=dataset.get_class_count(), hidden_size=hidden_n, num_layers=layers_n).to(DEVICE)
 
-    z = 1
-    #optimizer = torch.optim.Adam(rnn.parameters(), lr=learning_rate)
-    #loss_function = nn.MSELoss()
+    optimizer = torch.optim.Adam(rnn.parameters(), lr=learning_rate)
+    loss_function = nn.CrossEntropyLoss()
 
-    #train_model(rnn, dataloader=dataloder, loss_function=loss_function, optimizer=optimizer, batch_size = batch_size, epochs=epochs_n, show_time=show_time, show_epoch_freq=show_epoch_freq)
+    train_model(rnn, dataloader=dataloder, loss_function=loss_function, optimizer=optimizer, batch_size = batch_size, epochs=epochs_n, show_time=show_time, show_iterations=show_iterations)
+
     #test_model(rnn, dataloder, init_sequence_length=seq_leng, show_time=show_time, show_graphs=show_graphs)
 
 def main():
@@ -239,11 +252,11 @@ def main():
     LEARNING_RATE = 0.005
     BATCH_SIZE = 100
     NUM_EPOCHS = 250
-    SEQUENCE_LENGTH = 75
-    HIDDEN_NEURONS=8
-    NUM_LAYERS = 1
+    SEQUENCE_LENGTH = 200
+    HIDDEN_NEURONS=100
+    NUM_LAYERS = 2
 
-    experiment(nn.GRU, SEQUENCE_LENGTH, BATCH_SIZE, HIDDEN_NEURONS, NUM_LAYERS, LEARNING_RATE, NUM_EPOCHS, show_time=False, show_graphs=True, show_epoch_freq=25)
+    experiment(nn.GRU, SEQUENCE_LENGTH, BATCH_SIZE, HIDDEN_NEURONS, NUM_LAYERS, LEARNING_RATE, NUM_EPOCHS, show_time=False, show_graphs=True, show_iterations=50)
 
 
 if __name__ == '__main__':
