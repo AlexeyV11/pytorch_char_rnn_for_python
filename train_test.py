@@ -119,7 +119,7 @@ class MyDataset(Dataset):
 
     def decode(self, arr):
         if self._one_hot_mode:
-            arr = np.argmax(arr, axis=1)
+            arr = np.argmax(arr, axis=-1)
 
         arr = arr.flatten().tolist()
         return "".join([self.int2char[s] for s in arr])
