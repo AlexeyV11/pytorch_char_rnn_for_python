@@ -18,7 +18,7 @@ DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 
 class MyRNN(nn.Module):
-    def __init__(self, rnn_type, input_size, hidden_size, num_layers, dropout_rate=0.0):
+    def __init__(self, rnn_type, input_size, hidden_size, num_layers, dropout_rate=0.05):
         super(MyRNN, self).__init__()
 
         # we input and output one hot character
@@ -121,6 +121,7 @@ class MyDataset(Dataset):
         if self._one_hot_mode:
             arr = np.argmax(arr, axis=1)
 
+        arr = arr.flatten().tolist()
         return "".join([self.int2char[s] for s in arr])
 
     def __len__(self):
@@ -169,6 +170,9 @@ def train_model(model, dataloader, loss_function, optimizer, batch_size, epochs,
             output = model(x_batch)
 
 
+            #
+            # TODO: should we process just last half?
+            #
             loss_total = 0
             for c in range(y_batch.shape[0]):
                 #loss_total += loss_function(output[c, :, :], y_batch[c, :, :].type(torch.LongTensor).to(DEVICE))
@@ -193,6 +197,17 @@ def train_model(model, dataloader, loss_function, optimizer, batch_size, epochs,
         print("Compute training time {}".format(time_total))
 
 
+def choose_next_max(arr):
+    probs = nn.Softmax()(arr.squeeze())
+
+    zer = np.zeros(arr.shape)
+    index = int(torch.argmax(probs).cpu().numpy())
+
+    zer[0, 0, index] = 1.0
+
+    return zer
+
+
 def generate_string(model, dataset):
     model.eval()
 
@@ -207,9 +222,11 @@ def generate_string(model, dataset):
         out = model.forward(next)
 
         # take last result; add dimension
-        next = out[-1,:,:][np.newaxis,:,:]
+        next = choose_next_max(out[-1,:,:][np.newaxis,:,:])
 
-        str += dataset.decode(out[-1,:].cpu().detach().numpy())
+        str += dataset.decode(next)
+
+        next = torch.Tensor(next).cuda()
 
     print(str)
     print()
