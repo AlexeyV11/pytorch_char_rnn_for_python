@@ -294,11 +294,14 @@ def experiment(rnn_type, seq_leng, batch_size, hidden_n, layers_n, learning_rate
 
 def main():
 
+    # TODO : add grad clip
+    # TODO : add temperature
+    # TODO : add next char selection based on probs; not just max
     LEARNING_RATE = 0.005
     BATCH_SIZE = 100
     NUM_EPOCHS = 250
-    SEQUENCE_LENGTH = 200
-    HIDDEN_NEURONS=100
+    SEQUENCE_LENGTH = 50
+    HIDDEN_NEURONS=128
     NUM_LAYERS = 2
 
     experiment(nn.GRU, SEQUENCE_LENGTH, BATCH_SIZE, HIDDEN_NEURONS, NUM_LAYERS, LEARNING_RATE, NUM_EPOCHS, show_time=False, show_graphs=True, show_iterations=500)
