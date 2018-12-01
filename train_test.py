@@ -224,7 +224,7 @@ def generate_string(model, dataset, params):
 
     model.init_hidden_state(1)
 
-    for i in range(200):
+    for i in range(params.GENERATED_LENGTH):
         out = model.forward(next)
 
         # we decide what will be the next character based on the last network step output
@@ -312,11 +312,13 @@ def main():
         HIDDEN_NEURONS = 128
         NUM_LAYERS = 2
         ARG_CLIP = 5
+
+        GENERATED_LENGTH = 500
         # we divide by temp before softmax
         # the higher the temp the more random results;
         # if temp is very close to 0 than we have almost 1 prob for the max class
         SOFTMAX_TEMP = 0.8
-        SHOW_ITERATION = 100
+        SHOW_ITERATION = 500
         SHOW_TIME = False
 
         # 0 for shakespeare; 1000 for code
