@@ -147,16 +147,16 @@ class MyDataset(Dataset):
         return one_hot
 
 
-def train_model(model, dataloader, loss_function, optimizer, batch_size, epochs, show_time=False, show_iterations=10):
+def train_model(model, dataloader, optimizer, loss_function, params):
     model.train()
     loss_all = []
 
     time_total = 0
     iter = 0
-    for epoch in range(0,epochs):
+    for epoch in range(0, params.NUM_EPOCHS):
         for x_batch, y_batch in dataloader:
             # new batch - new data so re-init hidden state + null the grads
-            model.init_hidden_state(batch_size)
+            model.init_hidden_state(params.BATCH_SIZE)
             optimizer.zero_grad()
 
             x_batch = x_batch.permute([1, 0, 2])
@@ -181,19 +181,22 @@ def train_model(model, dataloader, loss_function, optimizer, batch_size, epochs,
 
 
             loss_total.backward()
+
+            #torch.nn.utils.clip_grad_norm(model.parameters(), params.ARG_CLIP)
+
             optimizer.step()
 
             time_total += time.time() - start
 
             loss_all.append(loss_total.cpu().data.numpy())
 
-            if iter % show_iterations == 0:
+            if iter % params.SHOW_ITERATION == 0:
                 print("Training loss for iter {} : ".format(iter), loss_total.data.cpu().numpy())
 
                 generate_string(model, dataloader.dataset)
             iter += 1
 
-    if show_time:
+    if params.SHOW_TIME:
         print("Compute training time {}".format(time_total))
 
 
@@ -277,18 +280,18 @@ if False:
         return final_outputs
 
 
-def experiment(rnn_type, seq_leng, batch_size, hidden_n, layers_n, learning_rate, epochs_n, show_time=False, show_graphs=False, show_iterations=100):
+def experiment(rnn_type, params):
 
-    dataset = MyDataset("code_data", seq_leng)
+    dataset = MyDataset("code_data", params.SEQUENCE_LENGTH)
 
-    dataloder = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=True)
+    dataloder = DataLoader(dataset, batch_size=params.BATCH_SIZE, shuffle=True, drop_last=True)
 
-    rnn = MyRNN(rnn_type, input_size=dataset.get_class_count(), hidden_size=hidden_n, num_layers=layers_n).to(DEVICE)
+    rnn = MyRNN(rnn_type, input_size=dataset.get_class_count(), hidden_size=params.HIDDEN_NEURONS, num_layers=params.NUM_LAYERS).to(DEVICE)
 
-    optimizer = torch.optim.Adam(rnn.parameters(), lr=learning_rate)
+    optimizer = torch.optim.Adam(rnn.parameters(), lr=params.LEARNING_RATE)
     loss_function = nn.CrossEntropyLoss()
 
-    train_model(rnn, dataloader=dataloder, loss_function=loss_function, optimizer=optimizer, batch_size = batch_size, epochs=epochs_n, show_time=show_time, show_iterations=show_iterations)
+    train_model(rnn, dataloader=dataloder,optimizer=optimizer, loss_function=loss_function, params=params)
 
     #test_model(rnn, dataloder, init_sequence_length=seq_leng, show_time=show_time, show_graphs=show_graphs)
 
@@ -297,14 +300,25 @@ def main():
     # TODO : add grad clip
     # TODO : add temperature
     # TODO : add next char selection based on probs; not just max
-    LEARNING_RATE = 0.005
-    BATCH_SIZE = 100
-    NUM_EPOCHS = 250
-    SEQUENCE_LENGTH = 50
-    HIDDEN_NEURONS=128
-    NUM_LAYERS = 2
+    # TODO : should we back prop all the tiem sequence or jast last half?
+    # TODO : read http://www.cs.utoronto.ca/~ilya/pubs/2011/LANG-RNN.pdf
+    # TODO : revise GRU vs RNN internals
 
-    experiment(nn.GRU, SEQUENCE_LENGTH, BATCH_SIZE, HIDDEN_NEURONS, NUM_LAYERS, LEARNING_RATE, NUM_EPOCHS, show_time=False, show_graphs=True, show_iterations=500)
+    class default_params:
+        LEARNING_RATE = 0.005
+        BATCH_SIZE = 100
+        NUM_EPOCHS = 250
+        SEQUENCE_LENGTH = 50
+        HIDDEN_NEURONS = 128
+        NUM_LAYERS = 2
+        ARG_CLIP = 5
+        SHOW_ITERATION = 100
+        SHOW_TIME = False
+
+    params = default_params()
+
+
+    experiment(nn.GRU, params)
 
 
 if __name__ == '__main__':
