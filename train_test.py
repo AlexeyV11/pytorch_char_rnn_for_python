@@ -149,7 +149,6 @@ class MyDataset(Dataset):
 
 def train_model(model, dataloader, optimizer, loss_function, params):
     model.train()
-    loss_all = []
 
     time_total = 0
     iter = 0
@@ -178,17 +177,13 @@ def train_model(model, dataloader, optimizer, loss_function, params):
                 #loss_total += loss_function(output[c, :, :], y_batch[c, :, :].type(torch.LongTensor).to(DEVICE))
                 loss_total += loss_function(output[c, :, :], torch.max(y_batch[c, :, :], 1)[1].to(DEVICE))
 
-
-
             loss_total.backward()
 
-            #torch.nn.utils.clip_grad_norm(model.parameters(), params.ARG_CLIP)
+            torch.nn.utils.clip_grad_norm(model.parameters(), params.ARG_CLIP)
 
             optimizer.step()
 
             time_total += time.time() - start
-
-            loss_all.append(loss_total.cpu().data.numpy())
 
             if iter % params.SHOW_ITERATION == 0:
                 print("Training loss for iter {} : ".format(iter), loss_total.data.cpu().numpy())
@@ -297,7 +292,6 @@ def experiment(rnn_type, params):
 
 def main():
 
-    # TODO : add grad clip
     # TODO : add temperature
     # TODO : add next char selection based on probs; not just max
     # TODO : should we back prop all the tiem sequence or jast last half?
