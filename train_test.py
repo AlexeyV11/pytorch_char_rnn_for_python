@@ -173,7 +173,7 @@ def train_model(model, dataloader, optimizer, loss_function, params):
             # TODO: should we process just last half?
             #
             loss_total = 0
-            for c in range(y_batch.shape[0]):
+            for c in range(y_batch.shape[0] - params.SEQUENCE_LENGTH_FOR_BACKPROP, y_batch.shape[0]):
                 #loss_total += loss_function(output[c, :, :], y_batch[c, :, :].type(torch.LongTensor).to(DEVICE))
                 loss_total += loss_function(output[c, :, :], torch.max(y_batch[c, :, :], 1)[1].to(DEVICE))
 
@@ -300,7 +300,6 @@ def experiment(rnn_type, params):
     #test_model(rnn, dataloder, init_sequence_length=seq_leng, show_time=show_time, show_graphs=show_graphs)
 
 def main():
-    # TODO : should we back prop all the tiem sequence or jast last half?
     # TODO : read http://www.cs.utoronto.ca/~ilya/pubs/2011/LANG-RNN.pdf
     # TODO : revise GRU vs RNN internals
 
@@ -309,6 +308,12 @@ def main():
         BATCH_SIZE = 100
         NUM_EPOCHS = 250
         SEQUENCE_LENGTH = 50
+
+        # whist steps of seq length use during backprop;
+        # in case of SEQUENCE_LENGTH == SEQUENCE_LENGTH_FOR_BACKPROP we use all the steps
+        # in case SEQUENCE_LENGTH_FOR_BACKPROP == 1 just the last time step
+        SEQUENCE_LENGTH_FOR_BACKPROP = 50
+
         HIDDEN_NEURONS = 128
         NUM_LAYERS = 2
         ARG_CLIP = 5
