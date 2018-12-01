@@ -188,7 +188,7 @@ def train_model(model, dataloader, optimizer, loss_function, params):
             if iter % params.SHOW_ITERATION == 0:
                 print("Training loss for iter {} : ".format(iter), loss_total.data.cpu().numpy())
 
-                generate_string(model, dataloader.dataset)
+                generate_string(model, dataloader.dataset, params)
             iter += 1
 
     if params.SHOW_TIME:
@@ -197,8 +197,9 @@ def train_model(model, dataloader, optimizer, loss_function, params):
 
 
 
-def choose_next(arr):
-    probs = nn.Softmax()(arr.squeeze())
+def choose_next(arr, temper):
+    arr_temper = arr.squeeze() / temper
+    probs = nn.Softmax()(arr_temper)
 
     zer = np.zeros(arr.shape)
 
@@ -213,7 +214,7 @@ def choose_next(arr):
     return zer
 
 
-def generate_string(model, dataset):
+def generate_string(model, dataset, params):
     model.eval()
 
     str = "<BOF>\n"
@@ -228,7 +229,7 @@ def generate_string(model, dataset):
 
         # we decide what will be the next character based on the last network step output
         # apply function to choose the exact character and to generate one hot representation for it
-        next = choose_next(out[-1,:,:][np.newaxis,:,:])
+        next = choose_next(out[-1,:,:][np.newaxis,:,:], params.SOFTMAX_TEMP)
 
         str += dataset.decode(next)
 
@@ -299,8 +300,6 @@ def experiment(rnn_type, params):
     #test_model(rnn, dataloder, init_sequence_length=seq_leng, show_time=show_time, show_graphs=show_graphs)
 
 def main():
-
-    # TODO : add temperature
     # TODO : should we back prop all the tiem sequence or jast last half?
     # TODO : read http://www.cs.utoronto.ca/~ilya/pubs/2011/LANG-RNN.pdf
     # TODO : revise GRU vs RNN internals
@@ -313,6 +312,10 @@ def main():
         HIDDEN_NEURONS = 128
         NUM_LAYERS = 2
         ARG_CLIP = 5
+        # we divide by temp before softmax
+        # the higher the temp the more random results;
+        # if temp is very close to 0 than we have almost 1 prob for the max class
+        SOFTMAX_TEMP = 0.8
         SHOW_ITERATION = 100
         SHOW_TIME = False
 
