@@ -50,11 +50,11 @@ class MyRNN(nn.Module):
 
 class MyDataset(Dataset):
 
-    # split is an array of [x0, ... , x_end]
-    def __init__(self, path_to_data, seq_length, occurrence_min=1000, one_hot_mode=True):
+    # occurrence_min - min character count not to be unknown
+    def __init__(self, path_to_data, seq_length, occurrence_min, one_hot_mode=True):
         self._path_to_data = path_to_data
         self._seq_length = seq_length
-        self._occurrence_min = 1000
+        self._occurrence_min = occurrence_min
         self._one_hot_mode = one_hot_mode
 
         files = os.listdir(self._path_to_data)
@@ -286,7 +286,7 @@ if False:
 
 def experiment(rnn_type, params):
 
-    dataset = MyDataset("code_data", params.SEQUENCE_LENGTH)
+    dataset = MyDataset(params.DATASET_PATH, params.SEQUENCE_LENGTH, occurrence_min=params.MIN_CHAR_OCCURRENCE)
 
     dataloder = DataLoader(dataset, batch_size=params.BATCH_SIZE, shuffle=True, drop_last=True)
 
@@ -318,6 +318,11 @@ def main():
         SOFTMAX_TEMP = 0.8
         SHOW_ITERATION = 100
         SHOW_TIME = False
+
+        # 0 for shakespeare; 1000 for code
+        MIN_CHAR_OCCURRENCE=0
+        #DATASET_PATH = "code_data"
+        DATASET_PATH = "tinyshakespeare_data"
 
     params = default_params()
 
