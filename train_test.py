@@ -195,11 +195,18 @@ def train_model(model, dataloader, optimizer, loss_function, params):
         print("Compute training time {}".format(time_total))
 
 
-def choose_next_max(arr):
+
+
+def choose_next(arr):
     probs = nn.Softmax()(arr.squeeze())
 
     zer = np.zeros(arr.shape)
-    index = int(torch.argmax(probs).cpu().numpy())
+
+    # uncomment to choose character with max probability
+    # index = int(torch.argmax(probs).cpu().numpy())
+
+    # choose character from probability distribution
+    index = np.random.choice(range(len(probs)), p=probs.cpu().detach().numpy())
 
     zer[0, 0, index] = 1.0
 
@@ -219,8 +226,9 @@ def generate_string(model, dataset):
     for i in range(200):
         out = model.forward(next)
 
-        # take last result; add dimension
-        next = choose_next_max(out[-1,:,:][np.newaxis,:,:])
+        # we decide what will be the next character based on the last network step output
+        # apply function to choose the exact character and to generate one hot representation for it
+        next = choose_next(out[-1,:,:][np.newaxis,:,:])
 
         str += dataset.decode(next)
 
@@ -293,7 +301,6 @@ def experiment(rnn_type, params):
 def main():
 
     # TODO : add temperature
-    # TODO : add next char selection based on probs; not just max
     # TODO : should we back prop all the tiem sequence or jast last half?
     # TODO : read http://www.cs.utoronto.ca/~ilya/pubs/2011/LANG-RNN.pdf
     # TODO : revise GRU vs RNN internals
